@@ -1,5 +1,5 @@
 const { generateQrCode } = require("../utils/qr-code");
-const { db, app } = require('../utils/admin');
+const { db, app, auth } = require('../utils/admin');
 const config = require('../utils/config');
 const slugify = require('slugify')
 const busboy = require('busboy');
@@ -7,6 +7,7 @@ const queryString = require('query-string');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
+//const { auth } = require("firebase-admin");
 const cors = require('cors')({origin: true});
 
 //
@@ -233,6 +234,7 @@ exports.deleteDeal = async (request, response) => {
 
 // Get Reservation List
 exports.getReservationsList = async (request, response) => {
+    console.log(request.query)
     let range_init = request.query.range_init;
     let range_end = request.query.range_end;
     const todayDate = new Date();
@@ -240,6 +242,7 @@ exports.getReservationsList = async (request, response) => {
     // Get Deals collection
     let collectionReference = db.collection(`Reservations`)
         .where('restaurantId', '==', request.user.restaurantId)
+        .where('active', '==', true)
         
     // Filter by date range
     if(range_init){
@@ -252,9 +255,6 @@ exports.getReservationsList = async (request, response) => {
     } else {
         range_end = new Date(todayDate.getFullYear(), todayDate.getMonth()+1, 0);
     }
-
-    // ToDo: Add filter by status 
-    //.where('active', '==', true)
 
     // Get collection results
     const collection = await collectionReference
@@ -271,34 +271,62 @@ exports.getReservationsList = async (request, response) => {
     // Response
     if (collection.size > 0) {
         let deals = [];
-        collection.forEach((doc) => {
+        for(doc of collection.docs){
+            // Get Deal
+            const dealReference =  db
+                .collection('/Deals/')
+                .doc(doc.data().dealId)
+            const dealSnap = await dealReference.get()
+            .catch((err) => {
+                return response.status(500).json({
+                    error: err.code
+                });
+            });
+
             // Determine status description
-            let status_description;
-            switch(doc.data().type){
+            let dealDetails;
+            switch(dealSnap.data().dealType){
                 case 2:
-                    status_description = "Reservación cancelada";
-                    break;
-                case 3:
-                    status_description = "Oferta redimida";
-                    break;
-                case 4:
-                    status_description = "Esperando cliente";
+                    dealDetails = `${dealSnap.data().description}.`;
                     break;
                 case 1:
                 default:
-                    status_description = "Reservación activa"
+                    dealDetails = `${(dealSnap.data().discount * 100)}% de descuento.`;
             }
 
-            // Build reservation object
+            // Get User
+            const userSnap = await auth.getUser(doc.data().customerId);
+            const user = userSnap.toJSON();
+
+            // Determine status description
+            let statusDescription = "Reservación activa"
+            switch(doc.data().status){
+                case 2:
+                    statusDescription = "Reservación cancelada";
+                    break;
+                case 3:
+                    statusDescription = "Oferta redimida";
+                    break;
+                case 4:
+                    statusDescription = "Esperando cliente";
+                    break;
+                case 1:
+                default:
+                    statusDescription = "Reservación activa"
+            }
+            
             deals.push({
                 id: doc.id,
                 ...doc.data(),
-                status_description,
+                statusDescription,
                 checkIn: doc.data().checkIn.toDate(),
                 createdAt: doc.data().createdAt.toDate(),
-                reservationDate: doc.data().reservationDate.toDate()
+                reservationDate: doc.data().reservationDate.toDate(),
+                dealType: dealSnap.data().dealType,
+                dealDetails,
+                userName: user.displayName
             });
-        });
+        }
         return response.json(deals);
     } else {
         return response.status(204).json({
