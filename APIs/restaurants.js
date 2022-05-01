@@ -216,6 +216,23 @@ exports.getDeal = async (request, response) => {
         });
     }
 }
+// Get Deal
+exports.updateDeal = (request, response) => {
+
+    const docRef = db.doc(`Deals/${request.params.dealId}`);
+    docRef.update(request.body)
+    .then(() => {
+        docRef.get().then(documentSnapshot => {
+            response.json(documentSnapshot.data());
+        });
+    })
+    .catch((err) => {
+        console.error(err);
+        return response.status(500).json({
+            error: err.code
+        });
+    });
+}
 // Delete deal
 exports.deleteDeal = async (request, response) => {
     const docRef = db.doc(`Deals/${request.params.dealId}`);
@@ -305,10 +322,10 @@ exports.getReservationsList = async (request, response) => {
                     statusDescription = "Reservación cancelada";
                     break;
                 case 3:
-                    statusDescription = "Oferta redimida";
+                    statusDescription = "Esperando cliente";
                     break;
                 case 4:
-                    statusDescription = "Esperando cliente";
+                    statusDescription = "Oferta redimida";
                     break;
                 case 1:
                 default:

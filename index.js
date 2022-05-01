@@ -35,6 +35,7 @@ const {
   getDeal,
   getDeals,
   createDeal,
+  updateDeal,
   deleteDeal,
 
   getReservationsList,
@@ -67,7 +68,8 @@ app.get('/partner/restaurant', auth, getPartnerRestaurant);
 app.put('/partner/restaurant', auth, editRestaurant);
 app.get('/partner/deals', auth, getDeals);
 app.get('/partner/deal/:dealId', auth, getDeal);
-app.delete('/partner/deal/:dealId', auth, deleteDeal)
+app.put('/partner/deal/:dealId', auth, updateDeal);
+app.delete('/partner/deal/:dealId', auth, deleteDeal);
 app.post('/partner/deal', auth, createDeal);
 app.get('/partner/reservations', auth, getReservationsList);
 
