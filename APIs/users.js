@@ -218,7 +218,6 @@ exports.getPartnerRestaurant = (request, response) => {
 		.then(data => {
 
 			if (data.size < 1) {
-				console.log('A')
 				return response.status(204).json({
 					error: 'no results'
 				});
@@ -239,11 +238,9 @@ exports.getPartnerRestaurant = (request, response) => {
 			});
 
 			//
-			console.log('B')
 			return response.json(restaurants);
 		})
 		.catch((err) => {
-			console.log('C')
 			console.error(err);
 			return response.status(500).json({
 				error: err.code
