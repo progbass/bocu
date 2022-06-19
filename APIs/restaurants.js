@@ -30,6 +30,24 @@ exports.getRestaurant = async (request, response) => {
             const menus = [];
             menuCollection.forEach(m => { menus.push(m.data()) });
 
+            // Get restaurant deals
+            const dealsCollection = await db.collection(`Deals`)
+                .where('restaurantId', '==', doc.id)
+                .get()
+                .catch((err) => {
+                    console.error(err);
+                    return;
+                });
+            const deals = [];
+            dealsCollection.forEach(doc => {
+                if(isDealValid(doc.data())){
+                    deals.push({
+                        ...doc.data(),
+                        id: doc.id
+                    })
+                }
+            })
+
             // get restaurant raitings list
             const raitingRef = await db.collection(`RestaurantRatings`)
                 .where('restaurantId', '==', doc.id)
@@ -85,7 +103,8 @@ exports.getRestaurant = async (request, response) => {
                 ...doc.data(),
                 id: doc.id,
                 menus,
-                rating
+                rating,
+                deals
             });
         })
         .catch((err) => {
@@ -266,11 +285,31 @@ exports.getRestaurants = async (request, response) => {
                 rating = `${rating} (${ratingCount})`;
             }
 
+            // Get restaurant deals
+            const deals = [];
+            const dealsCollection = await db.collection(`Deals`)
+                .where('restaurantId', '==', doc.get('id'))
+                .get()
+                .catch((err) => {
+                    console.error(err);
+                    return;
+                });
+            dealsCollection.forEach(doc => {
+                if(isDealValid(doc.data())){
+                    //console.log('asdasd ', isDealValid(doc.data()))
+                    deals.push({
+                        ...doc.data(),
+                        id: doc.id
+                    })
+                }
+            })
+
             // Return restaurant object
             restaurants.push({
                 ...doc.data(),
                 id: doc.id,
-                rating
+                rating,
+                deals
             });
         }
 
@@ -281,5 +320,31 @@ exports.getRestaurants = async (request, response) => {
             error: 'No restaurants were found.'
         });
     }
+}
+
+
+
+const isDealValid = (deal) => {
+    // Config
+    let isValid = false;
+
+    // Is active
+    if(!deal.active){
+        return false;
+    }
+
+    // Number of uses
+    if(!deal.useCount >= deal.useMax){
+        return false;
+    }
+
+    // Check expry date
+    const now = dayjs();
+    if(now > dayjs.unix(deal.expiresAt.seconds).utcOffset(UTC_OFFSET)){
+        return false
+    }
+
+    //
+    return true;
 }
 
