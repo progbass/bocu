@@ -218,9 +218,11 @@ exports.getRestaurantGallery = async (request, response) => {
 
 
 
-
+// Get Restaurants List
 exports.getRestaurants = async (request, response) => {
-    let collectionRef = db.collection('Restaurants').limit(RESTAURANT_MAX_COUNT);
+    let collectionRef = db.collection('Restaurants')
+        .orderBy('createdAt', 'desc')
+        .limit(RESTAURANT_MAX_COUNT);
     let collection = await collectionRef.get()
         .catch((err) => {
             console.error(err);
@@ -236,6 +238,11 @@ exports.getRestaurants = async (request, response) => {
         let restaurants = [];
         for (let doc of docs) {
             // get restaurant raitings list
+            if(!doc.get('id')){
+                break;
+            }
+
+            // Get collection
             const raitingRef = await db.collection(`RestaurantRatings`)
                 .where('restaurantId', '==', doc.get('id'))
                 .get()
