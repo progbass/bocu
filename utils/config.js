@@ -8,5 +8,7 @@ module.exports = {
 	messagingSenderId: process.env.MESSAGING_SENDER_ID,
 	appId: process.env.APP_ID,
 	measurementId: process.env.MEASUREMENT_ID,
-	databaseURL: process.env.DATABASE_URL
+	databaseURL: process.env.DATABASE_URL,
+	algoliaAppId: process.env.ALGOLIA_APP_ID,
+	algoliaAdminApiKey: process.env.ALOGLIA_ADMIN_API_KEY
   };
