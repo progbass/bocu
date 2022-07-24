@@ -84,13 +84,90 @@ exports.getFavorites = async (request, response) => {
     // Response
     if (collection.size > 0) {
         let favorites = [];
-        collection.forEach((doc) => {
+        for (const fav of collection.docs) {
+            // Get Restaurant
+            const restaurantRef = db.doc(`Restaurants/${fav.get('restaurantId')}`)
+            const restaurant =  await restaurantRef.get()
+                .catch(err => {});
+
+            // Get collection
+            const raitingRef = await db.collection(`RestaurantRatings`)
+                .where('restaurantId', '==', restaurant.id)
+                .get()
+                .catch((err) => {
+                    console.error(err);
+                    return;
+                });
+
+            // Get raitings average
+            let rating = 0;
+            const ratingCount = raitingRef.size;
+            if(ratingCount){ 
+                let counterGroups = {
+                    'one': 0,
+                    'two': 0,
+                    'three': 0,
+                    'four': 0,
+                    'five': 0,
+                }
+                raitingRef.forEach(val => {
+                    switch(val.data().rate){
+                        case 1:
+                            counterGroups.one += 1;
+                            break;
+                        case 2:
+                            counterGroups.two += 1;
+                            break;
+                        case 3:
+                            counterGroups.three += 1;
+                            break;
+                        case 4:
+                            counterGroups.four += 1;
+                            break;
+                        case 5:
+                            counterGroups.five += 1;
+                            break;
+                    }
+                })
+                rating = (
+                    1 * counterGroups.one
+                    + 2 * counterGroups.two
+                    + 3 * counterGroups.three
+                    + 4 * counterGroups.four
+                    +5 * counterGroups.five
+                ) / (5 * ratingCount);
+                rating *= 5;
+                rating = `${rating} (${ratingCount})`;
+            }
+
+            // Get restaurant deals
+            const deals = [];
+            const dealsCollection = await db.collection(`Deals`)
+                .where('restaurantId', '==', restaurant.id)
+                .get()
+                .catch((err) => {
+                    console.error(err);
+                    return;
+                });
+            dealsCollection.forEach(val => {
+                if(isDealValid(val.data())){
+                    deals.push({
+                        ...val.data(),
+                        id: val.id
+                    })
+                }
+            })
+
             favorites.push({
-                ...doc.data(),
-                id: doc.id,
-                createdAt: dayjs.unix(doc.data().createdAt._seconds).utcOffset(UTC_OFFSET)
+                ...fav.data(),
+                ...restaurant.data(),
+                isFavorite: true,
+                deals,
+                rating,
+                id: restaurant.id,
+                createdAt: dayjs.unix(fav.data().createdAt._seconds).utcOffset(UTC_OFFSET)
             });
-        });
+        }
         return response.json(favorites);
     } else {
         return response.status(204).json({
@@ -123,4 +200,29 @@ exports.removeFavorite = async (request, response) => {
     return response.json({
         message: 'Favorite was removed successfully.'
     });
+}
+
+//
+const isDealValid = (deal) => {
+    // Config
+    let isValid = false;
+
+    // Is active
+    if(!deal.active){
+        return false;
+    }
+
+    // Number of uses
+    if(!deal.useCount >= deal.useMax){
+        return false;
+    }
+
+    // Check expry date
+    const now = dayjs();
+    if(now > dayjs.unix(deal.expiresAt.seconds).utcOffset(UTC_OFFSET)){
+        return false
+    }
+
+    //
+    return true;
 }
