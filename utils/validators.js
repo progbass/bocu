@@ -42,3 +42,30 @@ exports.validateSignUpData = (data) => {
 		valid: Object.keys(errors).length === 0 ? true : false
 	};
 };
+
+const validateName = (name) => {
+	// Name validations
+	if(name != undefined && name != '' ){
+		return true;
+	}
+	return false;
+}
+exports.validateName = validateName;
+
+const validateAddress = (address) => {
+	// Address validations
+	if(address != undefined && address != ''){
+		return true
+	}
+	return false;
+}
+exports.validateAddress = validateAddress;
+
+const validatePhone = (phone) => {
+	// Phone validations
+	if(phone != undefined && phone != ''){
+		return true
+	}
+	return false;
+}
+exports.validatePhone = validatePhone;
