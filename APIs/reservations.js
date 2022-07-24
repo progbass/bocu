@@ -10,13 +10,17 @@ dayjs.tz.setDefault("America/Mexico_City")
 
 // Config.
 const UTC_OFFSET = -5;
-const RESERVATION_TOLERANCE_MINUTES = 15;
 const RESERVATION_STATUS = {
-    ACTIVE: 1,
-    AWAITING: 2,
-    CANCELED: 3,
-    FULFILLED: 4
-}
+    AWAITING_CUSTOMER: 1,
+    USER_CANCELED: 2,
+    TOLERANCE_TIME: 3,
+    RESERVATION_EXPIRED: 4, 
+    RESERVATION_FULFILLED: 5,
+    RESTAURANT_CANCELED: 6,
+    OTHER: 7,
+    DEAL_EXPIRED: 8,
+    DEAL_CANCELED: 9
+  }
 
 // Methods
 exports.createReservation = async (request, response) => {
@@ -24,7 +28,7 @@ exports.createReservation = async (request, response) => {
         // Create reservation prototype.
         const newReservation = {
             active: true,
-            status: 1,
+            status: RESERVATION_STATUS.AWAITING_CUSTOMER,
             checkIn: null,
             count: request.body.count,
             customerId: request.body.customerId,
@@ -91,7 +95,7 @@ exports.cancelReservation = async (request, response) => {
         // Get reservation
         const reservationRef = db.doc(`Reservations/${request.params.reservationId}`);
         await reservationRef.update({
-            status: 3, 
+            status: RESERVATION_STATUS.USER_CANCELED, 
             active: false,
             cancelledAt: app.firestore.Timestamp.fromDate(new Date())
         });
@@ -127,11 +131,16 @@ exports.getReservation = async (request, response) => {
                     error: err.code
                 });
             });
+
+        // Get User
+        const customerSnap = await auth.getUser(document.data().customerId);
+        const customer = customerSnap.toJSON();
         
         // Return reservation document
         return response.status(200).json({
             ...document.data(),
-            id: document.id
+            id: document.id,
+            customer: customer.email
         });
     } catch (err){
         return response.status(500).json({ error: err })
