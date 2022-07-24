@@ -1,25 +1,43 @@
 require("dotenv").config();
 
-const app = require('firebase-admin');
-const { applicationDefault } = require("firebase-admin/app");
-const { getDatabase } = require("firebase/database");
-const { connectFirestoreEmulator } = require("firebase/firestore");
-const { getFirestore } = require("firebase-admin/firestore");
-const { getAuth } = require("firebase-admin/auth");
+const { initializeApp: initializeAdmin, applicationDefault } = require('firebase-admin/app');
+const { initializeApp } = require("firebase/app");
+const { getFirestore } = require('firebase/firestore');
+const { getStorage } = require('firebase/storage');
+const { getAuth: getAdminAuth } = require("firebase-admin/auth");
+const { getAuth } = require("firebase/auth");
 const config = require('./config');
 
-app.initializeApp({
+// Init admin app. To perform specific operations that require priviliged permissions
+const admin = initializeAdmin({
     credential: applicationDefault(),
-    ...config
-	//databaseURL: "https://bocu-b909d.firebaseio.com"
+    apiKey: config.apiKey,
+    authDomain: config.authDomain,
+    projectId: config.projectId,
+    storageBucket: config.storageBucket,
+    messagingSenderId: config.messagingSenderId,
+    appId: config.appId,
+    measurementId: config.measurementId,
+    databaseURL: config.databaseURL
+})
+
+// Standard app (run as 'client-side' to avoid using privileged permissions of the 'admin' SDK)
+const app = initializeApp({
+    apiKey: config.apiKey,
+    authDomain: config.authDomain,
+    projectId: config.projectId,
+    storageBucket: config.storageBucket,
+    messagingSenderId: config.messagingSenderId,
+    appId: config.appId,
+    measurementId: config.measurementId,
+    databaseURL: config.databaseURL
 });
 
-//
-const auth = getAuth(); //app.auth();
+// Get SDKs references
+const auth = getAuth(app);
+const db = getFirestore(app);
+const storage = getStorage(app);
+const adminAuth = getAdminAuth(admin);
 
-//const db = {}//getDatabase();
-const db = getFirestore();
-
-//connectFirestoreEmulator(db, 'localhost', 8080);
-
-module.exports = { app, db, auth };
+// Export objects
+module.exports = { app, db, auth, storage, admin, adminAuth };
