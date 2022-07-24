@@ -11,10 +11,15 @@ dayjs.tz.setDefault("America/Mexico_City")
 // Config.
 const RESERVATION_TOLERANCE_MINUTES = 15;
 const RESERVATION_STATUS = {
-    ACTIVE: 1,
-    AWAITING: 2,
-    CANCELED: 3,
-    FULFILLED: 4
+    AWAITING_CUSTOMER: 1,
+    USER_CANCELED: 2,
+    TOLERANCE_TIME: 3,
+    RESERVATION_EXPIRED: 4, 
+    RESERVATION_FULFILLED: 5,
+    RESTAURANT_CANCELED: 6,
+    OTHER: 7,
+    DEAL_EXPIRED: 8,
+    DEAL_CANCELED: 9
 }
 
 // Methods
@@ -88,8 +93,10 @@ exports.redeemDeal = async (request, response) => {
         reservation = reservationsColl.docs[0];
 
         // Verificar que la reservacion no haya sido concluída
-        if(reservation.get('status') == RESERVATION_STATUS.CANCELED
-        || reservation.get('status') == RESERVATION_STATUS.FULFILLED){
+        if(reservation.get('status') == RESERVATION_STATUS.RESERVATION_EXPIRED
+        || reservation.get('status') == RESERVATION_STATUS.RESERVATION_FULFILLED
+        || reservation.get('status') == RESERVATION_STATUS.USER_CANCELED
+        || reservation.get('status') == RESERVATION_STATUS.RESTAURANT_CANCELED){
             return response.status(400).json({
                 error: 'Reservation was already redeemed or was canceled.'
             })
@@ -171,8 +178,10 @@ exports.findDeal = async (request, response) => {
         reservation = reservationsColl.docs[0];
 
         // Validate reservation status
-        if(reservation.get('status') == RESERVATION_STATUS.FULFILLED
-        || reservation.get('status') == RESERVATION_STATUS.CANCELED){
+        if(reservation.get('status') == RESERVATION_STATUS.RESERVATION_EXPIRED
+        || reservation.get('status') == RESERVATION_STATUS.RESERVATION_FULFILLED
+        || reservation.get('status') == RESERVATION_STATUS.USER_CANCELED
+        || reservation.get('status') == RESERVATION_STATUS.RESTAURANT_CANCELED){
             return response.status(400).json({
                 error: 'Reservation was already redeemed or canceled.'
             });
