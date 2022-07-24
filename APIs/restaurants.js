@@ -1,17 +1,26 @@
-const functions = require("firebase-functions");
-const { generateQrCode } = require("../utils/qr-code");
-const { db, app } = require('../utils/admin');
+const { db, app, storage } = require('../utils/admin');
+const { ref: storageRef, getDownloadURL } = require('firebase/storage');
+const { 
+    deleteDoc,
+    addDoc,
+    collection, 
+    limit, 
+    orderBy, 
+    getDocs, 
+    getDoc, 
+    doc, 
+    query, 
+    where, 
+    updateDoc 
+} = require('firebase/firestore'); 
+const { 
+    hasMissingRequirements, 
+    generateQR
+} = require('../utils/restaurant-utils');
 const getCurrentUser = require("../utils/getCurrentUser");
-const config = require('../utils/config');
 const slugify = require('slugify')
-const busboy = require('busboy');
-const queryString = require('query-string');
-const path = require('path');
-const os = require('os');
-const fs = require('fs');
 const dayjs = require("dayjs");
 const algoliasearch = require("algoliasearch");
-const testjs = dayjs.tz.guess();
 
 // Config Algolia SDK
 const algoliaClient = algoliasearch(
@@ -26,65 +35,177 @@ const RESTAURANT_DEALS_COUNT_MAX = 10;
 const DEALS_EXPIRY_OFFSET_MINUTES = 10;
 const MAX_SEARCH_RESULTS_HITS = 100;
 
-//
+// GET SINGLE RESTAURANT
 exports.getRestaurant = async (request, response) => {
-    let document = db.collection('Restaurants').doc(`${request.params.restaurantId}`);
-    document.get()
-        .then(async doc => {
+    try {
+        let restaurant = await getDoc(
+            doc(db, 'Restaurants', `${request.params.restaurantId}`)
+        );
+        if(!restaurant.exists()){
+            return response.status(404).json({
+                error: 'Restaurant not found.'
+            });
+        }
+        
+        // Get user 'favorite' if logged in
+        let isFavorite = false;
+        const loggedUser = await getCurrentUser(request, response);        
+        if(loggedUser){
+            const favoritesCollection = await getDocs(query(
+                collection(db, 'UserFavorites'),
+                where('userId', '==', loggedUser.uid)
+            )).catch((err) => {
+                console.error(err);
+                return;
+            });
+
+            // Is 'favorite' of the user
+            favoritesCollection.forEach(favorite => {
+                if(favorite.data().restaurantId == restaurant.id){
+                    isFavorite = true;
+                }
+            })
+        }
+        
+        // Get menu items
+        const menuCollection = await getDocs(query(
+            collection(db, 'RestaurantMenus'),
+            where('restaurantId', '==', restaurant.id)
+        ));
+        const menus = [];
+        menuCollection.forEach(m => { menus.push(m.data()) });
+ 
+        // Get restaurant deals
+        const dealsCollection = await getDocs(query(
+            collection(db, `Deals`),
+            where('restaurantId', '==', restaurant.id)
+        )).catch((err) => {
+            console.error(err);
+            return;
+        });
+        const deals = [];
+        dealsCollection.forEach(doc => {
+            if(isDealValid(doc.data())){
+                deals.push({
+                    ...doc.data(),
+                    id: doc.id
+                })
+            }
+        })
+
+        // get restaurant raitings list
+        const raitingRef = await getDocs(query(
+            collection(db, `RestaurantRatings`),
+            where('restaurantId', '==', restaurant.id)
+        )).catch((err) => {
+            console.error(err);
+            return;
+        });
+
+        // Get raitings average
+        let rating = 0;
+        const ratingCount = raitingRef.size;
+        if(ratingCount){ 
+            let counterGroups = {
+                'one': 0,
+                'two': 0,
+                'three': 0,
+                'four': 0,
+                'five': 0,
+            }
+            raitingRef.forEach(doc => {
+                switch(doc.data().rate){
+                    case 1:
+                        counterGroups.one += 1;
+                        break;
+                    case 2:
+                        counterGroups.two += 1;
+                        break;
+                    case 3:
+                        counterGroups.three += 1;
+                        break;
+                    case 4:
+                        counterGroups.four += 1;
+                        break;
+                    case 5:
+                        counterGroups.five += 1;
+                        break;
+                }
+            })
+            rating = (
+                1 * counterGroups.one
+                + 2 * counterGroups.two
+                + 3 * counterGroups.three
+                + 4 * counterGroups.four
+                +5 * counterGroups.five
+            ) / (5 * ratingCount);
+            rating *= 5;
+            rating = `${rating} (${ratingCount})`;
+        }
+
+        // Return restaurant document
+        return response.status(200).json({
+            ...restaurant.data(),
+            id: restaurant.id,
+            menus,
+            rating,
+            deals,
+            isFavorite
+        });
+    } catch (err) {
+        console.error(err);
+        return response.status(500).json({
+            error: err.code
+        });
+    };  
+}
+// GET LIST OF RESTAURANTS
+exports.getRestaurants = async (request, response) => {
+    let restaurantsCollection = await getDocs(query(
+        collection(db, 'Restaurants'),
+        orderBy('createdAt', 'desc'),
+        limit(RESTAURANT_MAX_COUNT)
+    )).catch((err) => {
+        console.error(err);
+        return response.status(500).json({
+            error: err.code
+        });
+    });
+
+    // Response
+    if (restaurantsCollection.size > 0) {
+        // update reservation status
+        let docs = restaurantsCollection.docs;
+        let restaurants = [];
+        for (let doc of docs) {
 
             // Get user 'favorite' if logged in
             let isFavorite = false;
             const loggedUser = await getCurrentUser(request, response);
             if(loggedUser){
-                const favoritesCollection = await db.collection(`UserFavorites`)
-                    .where('userId', '==', loggedUser.uid)
-                    .get()
-                    .catch((err) => {
-                        console.error(err);
-                        return;
-                    });
-
+                const favoritesCollection = await getDocs(query(
+                    collection(db, `UserFavorites`),
+                    where('userId', '==', loggedUser.uid)
+                )).catch((err) => {
+                    console.error(err);
+                    return;
+                });
                 // Is 'favorite' of the user
                 favoritesCollection.forEach(favorite => {
                     if(favorite.data().restaurantId == doc.id){
-                        isFavorite = true;
+                        isFavorite;
                     }
                 })
             }
 
-            // Get menu items
-            const menuCollection = await db.collection('RestaurantMenus')
-                .where('restaurantId', '==', doc.id)
-                .get();
-            const menus = [];
-            menuCollection.forEach(m => { menus.push(m.data()) });
-
-            // Get restaurant deals
-            const dealsCollection = await db.collection(`Deals`)
-                .where('restaurantId', '==', doc.id)
-                .get()
-                .catch((err) => {
-                    console.error(err);
-                    return;
-                });
-            const deals = [];
-            dealsCollection.forEach(doc => {
-                if(isDealValid(doc.data())){
-                    deals.push({
-                        ...doc.data(),
-                        id: doc.id
-                    })
-                }
-            })
-
-            // get restaurant raitings list
-            const raitingRef = await db.collection(`RestaurantRatings`)
-                .where('restaurantId', '==', doc.id)
-                .get()
-                .catch((err) => {
-                    console.error(err);
-                    return;
-                });
+            // Get collection
+            const raitingRef = await getDocs(query(
+                collection(db, `RestaurantRatings`),
+                where('restaurantId', '==', doc.id)
+            )).catch((err) => {
+                console.error(err);
+                return;
+            });
 
             // Get raitings average
             let rating = 0;
@@ -127,23 +248,194 @@ exports.getRestaurant = async (request, response) => {
                 rating = `${rating} (${ratingCount})`;
             }
 
-            // Return restaurant document
-            response.json({
+            // Get restaurant deals
+            const deals = [];
+            const dealsCollection = await getDocs(query(
+                collection(db, `Deals`),
+                where('restaurantId', '==', doc.id)
+            )).catch((err) => {
+                console.error(err);
+                return;
+            });
+            dealsCollection.forEach(doc => {
+                if(isDealValid(doc.data())){
+                    deals.push({
+                        ...doc.data(),
+                        id: doc.id
+                    })
+                }
+            })
+
+            // Return restaurant object
+            restaurants.push({
                 ...doc.data(),
                 id: doc.id,
-                menus,
+                isFavorite,
                 rating,
-                deals,
-                isFavorite
+                deals
             });
-        })
-        .catch((err) => {
-            console.error(err);
-            return response.status(500).json({
-                error: err.code
-            });
+        }
+
+        //
+        return response.json(restaurants);
+    } else {
+        return response.status(204).json({
+            error: 'No restaurants were found.'
         });
+    }
 }
+// EDIT RESTAURANT
+exports.editRestaurant = async (request, response) => {
+    let restaurantReference = doc(db, 'Restaurants', request.params.restaurantId);
+    let restaurant = await getDoc(restaurantReference);
+  
+    // Validate that restaurant exists.
+    if(!restaurant.exists){
+        response.status(404).json({message: 'User restaurant not found.'});
+    }
+    
+    // Update document.
+    await updateDoc(restaurantReference, request.body)
+      .catch((err) => {
+        console.error(err);
+        return response.status(500).json({
+          error: err.code,
+        });
+      });
+    
+    // Get updated record
+    restaurant = await getDoc(restaurantReference);
+    let restaurantData = restaurant.data();
+  
+    // Evaluate if restaurant has
+    // the minimum requirements defined by the business
+    const hasMinimumRequirements = !hasMissingRequirements(restaurantData);
+    
+    // Update restaurant 'minimum requirements' property
+    await updateDoc(restaurantReference, { hasMinimumRequirements })
+      .catch((err) => {
+        console.error(err);
+        return response.status(500).json({
+          error: err.code,
+        });
+      });
+  
+    // Get updated record
+    restaurant = await getDoc(restaurantReference);
+  
+    // Response
+    response.json({
+        ...restaurant.data(),
+        id: restaurant.id
+    });
+};
+// DELETE RESTAURANT
+exports.deleteRestaurant = async (request, response) => {
+    try {
+        let restaurant = await deleteDoc(
+            doc(db, 'Restaurants', `${request.params.restaurantId}`)
+        );
+
+        // Return restaurant document
+        return response.status(204).json({ message: 'success' });
+    } catch (err) {
+        console.error(err);
+        return response.status(500).json({
+            error: err.code
+        });
+    };  
+}
+// CREATE RESTAURANT
+exports.createRestaurant = async (request, response) => {
+    const restaurantCollection = collection(db, 'Restaurants');
+  
+    // Validate that restaurant does not exists.
+    const existingRestaurant = await getDocs(query(
+        restaurantCollection,
+        where('name', '==', request.body.name)
+    ));
+    if(existingRestaurant.size > 0){
+        return response.status(409).json({ error: 'Restaurant already exists.' });
+    }
+  
+    // Validate that restaurant does not exists.
+    const currentUserRestaurant = await getDocs(query(
+        restaurantCollection,
+        where('userId', '==', request.user.uid)
+    ));
+    if(currentUserRestaurant.size > 0){
+        return response.status(403).json({ error: 'User already have a restaurant.' });
+    }
+  
+    // Create restaurant.
+    const newRestaurantItem = {
+        name: request.body.name,
+        categories: [],
+        qrCode: '',
+        photo: '',
+        avatar: '',
+        rating: 0,
+        location: {},
+        address: '',
+        phone: '',
+        description: '',
+        instagram: '',
+    
+        ...request.body,
+        slug: slugify(request.body.name?.toLowerCase()),
+        active: false,
+        isApproved: false,
+        hasMinimumRequirements: false,
+        email: request.user.email,
+        userId: request.user.uid,
+        createdAt: dayjs().toDate(),
+    };
+    
+    const documentRef = await addDoc(
+        restaurantCollection,
+        newRestaurantItem
+    ).catch((err) => {
+        console.error(err);
+        return response.status(500).json({ error: err.code });
+    })
+
+    // Get new document
+    const documentSnapshot = await getDoc(documentRef);
+
+    // Evaluate if restaurant has
+    // the minimum requirements defined by the business
+    const hasMinimumRequirements = !hasMissingRequirements(documentSnapshot.data());
+
+    // Generate QR code
+    const qrRef = storageRef(
+        storage, 
+        `Restaurants/${documentSnapshot.data().slug}/qr_${
+            documentRef.id
+            }-${new Date().getTime()}.png`
+    );
+    let publicUrl = await generateQR(
+        documentRef.id,
+        qrRef
+    ); 
+    publicUrl = await getDownloadURL(qrRef);
+
+    // Update restaurant info
+    await updateDoc( documentRef, {
+        qrCode: publicUrl,
+        hasMinimumRequirements
+    });
+
+    // return new document
+    const updatedDocument = await getDoc(documentRef);
+    const responseItem = {
+        id: documentRef.id,
+        ...updatedDocument.data(),
+    };
+    return response.json(responseItem);
+};
+
+
+
 exports.getRestaurantDeal = async (request, response) => {
     // Validate that restaurantId exists.
     if(!request.params.restaurantId){
@@ -210,6 +502,8 @@ exports.getRestaurantDeals = async (request, response) => {
         return response.status(200).json([]);
     }
 }
+
+
 // Get Gallery
 exports.getRestaurantGallery = async (request, response) => {
     // Validate that restaurantId exists.
@@ -246,131 +540,6 @@ exports.getRestaurantGallery = async (request, response) => {
     }
 }
 
-// Get Restaurants List
-exports.getRestaurants = async (request, response) => {
-    let collectionRef = db.collection('Restaurants')
-        .orderBy('createdAt', 'desc')
-        .limit(RESTAURANT_MAX_COUNT);
-    let collection = await collectionRef.get()
-        .catch((err) => {
-            console.error(err);
-            return response.status(500).json({
-                error: err.code
-            });
-        });
-
-    // Response
-    if (collection.size > 0) {
-        // update reservation status
-        let docs = collection.docs;
-        let restaurants = [];
-        for (let doc of docs) {
-
-            // Get user 'favorite' if logged in
-            let isFavorite = false;
-            const loggedUser = await getCurrentUser(request, response);
-            if(loggedUser){
-                const favoritesCollection = await db.collection(`UserFavorites`)
-                    .where('userId', '==', loggedUser.uid)
-                    .get()
-                    .catch((err) => {
-                        console.error(err);
-                        return;
-                    });
-                // Is 'favorite' of the user
-                favoritesCollection.forEach(favorite => {
-                    if(favorite.data().restaurantId == doc.id){
-                        isFavorite;
-                    }
-                })
-            }
-
-            // Get collection
-            const raitingRef = await db.collection(`RestaurantRatings`)
-                .where('restaurantId', '==', doc.id)
-                .get()
-                .catch((err) => {
-                    console.error(err);
-                    return;
-                });
-
-            // Get raitings average
-            let rating = 0;
-            const ratingCount = raitingRef.size;
-            if(ratingCount){ 
-                let counterGroups = {
-                    'one': 0,
-                    'two': 0,
-                    'three': 0,
-                    'four': 0,
-                    'five': 0,
-                }
-                raitingRef.forEach(doc => {
-                    switch(doc.data().rate){
-                        case 1:
-                            counterGroups.one += 1;
-                            break;
-                        case 2:
-                            counterGroups.two += 1;
-                            break;
-                        case 3:
-                            counterGroups.three += 1;
-                            break;
-                        case 4:
-                            counterGroups.four += 1;
-                            break;
-                        case 5:
-                            counterGroups.five += 1;
-                            break;
-                    }
-                })
-                rating = (
-                    1 * counterGroups.one
-                    + 2 * counterGroups.two
-                    + 3 * counterGroups.three
-                    + 4 * counterGroups.four
-                    +5 * counterGroups.five
-                ) / (5 * ratingCount);
-                rating *= 5;
-                rating = `${rating} (${ratingCount})`;
-            }
-
-            // Get restaurant deals
-            const deals = [];
-            const dealsCollection = await db.collection(`Deals`)
-                .where('restaurantId', '==', doc.id)
-                .get()
-                .catch((err) => {
-                    console.error(err);
-                    return;
-                });
-            dealsCollection.forEach(doc => {
-                if(isDealValid(doc.data())){
-                    deals.push({
-                        ...doc.data(),
-                        id: doc.id
-                    })
-                }
-            })
-
-            // Return restaurant object
-            restaurants.push({
-                ...doc.data(),
-                id: doc.id,
-                isFavorite,
-                rating,
-                deals
-            });
-        }
-
-        //
-        return response.json(restaurants);
-    } else {
-        return response.status(204).json({
-            error: 'No restaurants were found.'
-        });
-    }
-}
 
 // Serch (with Algolia)
 exports.searchRestaurants = async (request, response) => {
