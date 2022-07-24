@@ -1,6 +1,7 @@
 const functions = require("firebase-functions");
 const { generateQrCode } = require("../utils/qr-code");
-const { db, app, auth } = require('../utils/admin');
+const { db, app } = require('../utils/admin');
+const getCurrentUser = require("../utils/getCurrentUser");
 const config = require('../utils/config');
 const slugify = require('slugify')
 const busboy = require('busboy');
@@ -9,20 +10,48 @@ const path = require('path');
 const os = require('os');
 const fs = require('fs');
 const dayjs = require("dayjs");
-const { database } = require("firebase-functions/v1/firestore");
+const algoliasearch = require("algoliasearch");
 const testjs = dayjs.tz.guess();
+
+// Config Algolia SDK
+const algoliaClient = algoliasearch(
+    process.env.ALGOLIA_APP_ID,
+    process.env.ALGOLIA_ADMIN_API_KEY
+);
 
 // Config
 const UTC_OFFSET = -5;
 const RESTAURANT_MAX_COUNT = 10;
 const RESTAURANT_DEALS_COUNT_MAX = 10;
 const DEALS_EXPIRY_OFFSET_MINUTES = 10;
+const MAX_SEARCH_RESULTS_HITS = 100;
 
 //
 exports.getRestaurant = async (request, response) => {
     let document = db.collection('Restaurants').doc(`${request.params.restaurantId}`);
     document.get()
         .then(async doc => {
+
+            // Get user 'favorite' if logged in
+            let isFavorite = false;
+            const loggedUser = await getCurrentUser(request, response);
+            if(loggedUser){
+                const favoritesCollection = await db.collection(`UserFavorites`)
+                    .where('userId', '==', loggedUser.uid)
+                    .get()
+                    .catch((err) => {
+                        console.error(err);
+                        return;
+                    });
+
+                // Is 'favorite' of the user
+                favoritesCollection.forEach(favorite => {
+                    if(favorite.data().restaurantId == doc.id){
+                        isFavorite = true;
+                    }
+                })
+            }
+
             // Get menu items
             const menuCollection = await db.collection('RestaurantMenus')
                 .where('restaurantId', '==', doc.id)
@@ -104,7 +133,8 @@ exports.getRestaurant = async (request, response) => {
                 id: doc.id,
                 menus,
                 rating,
-                deals
+                deals,
+                isFavorite
             });
         })
         .catch((err) => {
@@ -216,8 +246,6 @@ exports.getRestaurantGallery = async (request, response) => {
     }
 }
 
-
-
 // Get Restaurants List
 exports.getRestaurants = async (request, response) => {
     let collectionRef = db.collection('Restaurants')
@@ -237,14 +265,29 @@ exports.getRestaurants = async (request, response) => {
         let docs = collection.docs;
         let restaurants = [];
         for (let doc of docs) {
-            // get restaurant raitings list
-            if(!doc.get('id')){
-                break;
+
+            // Get user 'favorite' if logged in
+            let isFavorite = false;
+            const loggedUser = await getCurrentUser(request, response);
+            if(loggedUser){
+                const favoritesCollection = await db.collection(`UserFavorites`)
+                    .where('userId', '==', loggedUser.uid)
+                    .get()
+                    .catch((err) => {
+                        console.error(err);
+                        return;
+                    });
+                // Is 'favorite' of the user
+                favoritesCollection.forEach(favorite => {
+                    if(favorite.data().restaurantId == doc.id){
+                        isFavorite;
+                    }
+                })
             }
 
             // Get collection
             const raitingRef = await db.collection(`RestaurantRatings`)
-                .where('restaurantId', '==', doc.get('id'))
+                .where('restaurantId', '==', doc.id)
                 .get()
                 .catch((err) => {
                     console.error(err);
@@ -295,7 +338,7 @@ exports.getRestaurants = async (request, response) => {
             // Get restaurant deals
             const deals = [];
             const dealsCollection = await db.collection(`Deals`)
-                .where('restaurantId', '==', doc.get('id'))
+                .where('restaurantId', '==', doc.id)
                 .get()
                 .catch((err) => {
                     console.error(err);
@@ -303,7 +346,6 @@ exports.getRestaurants = async (request, response) => {
                 });
             dealsCollection.forEach(doc => {
                 if(isDealValid(doc.data())){
-                    //console.log('asdasd ', isDealValid(doc.data()))
                     deals.push({
                         ...doc.data(),
                         id: doc.id
@@ -315,6 +357,7 @@ exports.getRestaurants = async (request, response) => {
             restaurants.push({
                 ...doc.data(),
                 id: doc.id,
+                isFavorite,
                 rating,
                 deals
             });
@@ -329,6 +372,75 @@ exports.getRestaurants = async (request, response) => {
     }
 }
 
+// Serch (with Algolia)
+exports.searchRestaurants = async (request, response) => {
+    const algoliaIndex = algoliaClient.initIndex(request.params.indexName);
+    const {query = '', ...params} = request.body;
+    
+    // Query Algolia
+    const queryResponse = await algoliaIndex.search(query, {
+        ...params,
+        //attributesToRetrieve: ['firstname', 'lastname'],
+        hitsPerPage: MAX_SEARCH_RESULTS_HITS,
+    }).catch(err => {
+        console.error(err);
+        return response.status(500).json({
+            error: err.code
+        });
+    });
+    
+    if(queryResponse.hits.length){
+        let hits = queryResponse.hits;
+        let results = [];
+
+        // Get current user state
+        const loggedUser = await getCurrentUser(request, response)
+            .catch(err => {
+                console.log(err)
+            });
+        let favoritesCollection = undefined;
+        if(loggedUser){
+            favoritesCollection = await db.collection(`UserFavorites`)
+                .where('userId', '==', loggedUser.uid)
+                .get()
+                .catch((err) => {
+                    console.error(err);
+                    return;
+                });
+        }
+
+        // Configure each item
+        for (let doc of hits) {
+            // Get user 'favorite' if logged in
+            let isFavorite = false;
+            if(favoritesCollection){
+                // Is 'favorite' of the user
+                favoritesCollection.forEach(favorite => {
+                    if(favorite.data().restaurantId == doc.objectID){
+                        isFavorite = true;
+                    }
+                })
+            }
+
+            // Return restaurant object
+            results.push({
+                ...doc,
+                id: doc.objectID,
+                isFavorite,
+            });
+        }
+
+        //
+        return response.json({
+            ...queryResponse,
+            hits: results
+        });
+    }
+    
+    return response.status(204).json({
+        error: 'No restaurants were found.'
+    });
+}
 
 
 const isDealValid = (deal) => {
