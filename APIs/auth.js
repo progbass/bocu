@@ -4,7 +4,7 @@ const config = require("../utils/config")
 const { validateLoginData, validateSignUpData } = require('../utils/validators');
 //const { app, auth } = require('../utils/admin');
 
-exports.loginUser = (request, response) => {
+exports.loginUser = async (request, response) => {
     const { initializeApp } = require("firebase/app");
     const firebase = initializeApp(config);
     const auth = getAuth();
@@ -16,14 +16,14 @@ exports.loginUser = (request, response) => {
 	const { valid, errors } = validateLoginData(user);
 	if (!valid) return response.status(400).json(errors);
     //console.log(signInWithEmailAndPassword(auth, user.email, user.password))
-
     signInWithEmailAndPassword(auth, user.email, user.password)
-    .then((data) => {
+    .then(async (data) => {
         user = {
             ...user,
-            ...data.user
+            ...data.user,
         }
-        return data.user.getIdToken();
+        
+        return data.user.getIdToken(true);
     })
     .then((token) => {
         return response.json({ ...user, token });
