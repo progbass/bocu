@@ -8,9 +8,6 @@ const { getFirestore } = require("firebase-admin/firestore");
 const { getAuth } = require("firebase-admin/auth");
 const config = require('./config');
 
-//console.log(app)
-//const app = initializeApp(config);
-//const admin = {};
 app.initializeApp({
     credential: applicationDefault(),
     ...config
@@ -18,9 +15,11 @@ app.initializeApp({
 });
 
 //
-const auth = getAuth(); //app.auth(); //
+const auth = getAuth(); //app.auth();
+
 //const db = {}//getDatabase();
 const db = getFirestore();
+
 //connectFirestoreEmulator(db, 'localhost', 8080);
 
 module.exports = { app, db, auth };

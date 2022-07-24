@@ -218,7 +218,7 @@ exports.getPartnerRestaurant = (request, response) => {
 		.then(data => {
 
 			if (data.size < 1) {
-				return response.status(204).json({
+				return response.status(404).json({
 					error: 'no results'
 				});
 			}

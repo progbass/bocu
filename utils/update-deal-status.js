@@ -9,22 +9,22 @@ dayjs.extend(timezone)
 dayjs.tz.setDefault("America/Mexico_City")
 
 //
-exports.updateDealStatus = async (request, response, next) => {
-        // Consistent timestamp
-        const now = app.firestore.Timestamp.now();
+exports.updateDealStatus = async (context) => {
+    // Consistent timestamp
+    const now = app.firestore.Timestamp.now();
 
-        // Get expired deals
-        const dealsCollectionRef = db.collection('Deals')
-            .where('expiresAt', '<=', now.toDate())
-            .where('active', '==', true);
-        const dealsCollection = await dealsCollectionRef.get();
-        
-        // update deal status
-        let docs = dealsCollection.docs;
-        for (let doc of docs) {
-            await doc.ref.update({active: false});
-        }
-        
-        //
-        return
+    // Get expired deals
+    const dealsCollectionRef = db.collection('Deals')
+        .where('expiresAt', '<=', now.toDate())
+        .where('active', '==', true);
+    const dealsCollection = await dealsCollectionRef.get();
+    
+    // update deal status
+    let docs = dealsCollection.docs;
+    for (let doc of docs) {
+        await doc.ref.update({active: false});
+    }
+    
+    //
+    return
 };
