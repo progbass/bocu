@@ -3,10 +3,10 @@
   "description": "Cloud Functions for Firebase",
   "scripts": {
     "lint": "eslint .",
-    "serve": "firebase emulators:start --only functions",
+    "serve": "NODE_ENV=development firebase emulators:start",
     "shell": "firebase functions:shell",
-    "start": "npm run shell",
-    "deploy": "firebase deploy --only functions",
+    "start": "NODE_ENV=production npm run shell",
+    "deploy": "NODE_ENV=production firebase deploy --only functions",
     "logs": "firebase functions:log"
   },
   "engines": {
@@ -23,7 +23,8 @@
     "firebase-functions": "^3.21.2",
     "qrcode": "^1.5.0",
     "query-string": "^7.1.1",
-    "slugify": "^1.6.5"
+    "slugify": "^1.6.5",
+    "read-excel-file": "^5.3.5"
   },
   "devDependencies": {
     "eslint": "^8.9.0",
