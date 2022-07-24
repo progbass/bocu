@@ -1,8 +1,8 @@
-const { getMultiFactorResolver } = require('firebase/auth');
-const { app, db } = require('./admin');
+const { db, adminAuth } = require('./admin');
+const { doc, getDocs, getDoc, query, where, collection } = require('firebase/firestore');
 
 module.exports = async (request, response) => {
-	return new Promise((resolve, reject) => {
+	return new Promise(async (resolve, reject) => {
         // Get Auth Id token
         let idToken;
         if (request.headers.authorization && request.headers.authorization.startsWith('Bearer ')) {
@@ -11,33 +11,40 @@ module.exports = async (request, response) => {
             return resolve(undefined);
         }
 
-        //
-        let user = {};
-        app
-            .auth()
-            .verifyIdToken(idToken)
-            .then((decodedToken) => {
-                user = decodedToken;
-                return db.doc(`/Users/${user.uid}`).get()
-                //db.collection('users').where('userId', '==', request.user.uid).limit(1).get();
-            })
-            .then((doc) => {
-                // Set extra properties
-                // request.user.id = doc.docs[0].id;
-                // request.user.username = doc.docs[0].data().username;
-                // request.user.imageUrl = doc.docs[0].data().imageUrl;
+        try {
+            //
+            let user = {};
+            //auth
+            const decodedToken = await adminAuth.verifyIdToken(idToken)
+                .catch((err) => {
+                    console.error('Error while verifying token', err);
+                    return resolve(undefined);
+                });
+                
+            user = decodedToken;
+            //const userDBDocument = doc(db, `/Users/`, user.uid);
+            const userDBDocument = await getDoc(
+                doc(db, `/Users/`, user.uid)
+            );
+            
+            // Set extra properties
+            // request.user.id = userDBDocument.id;
+            // request.user.username = userDBDocument.data().username;
+            // request.user.imageUrl = userDBDocument.data().imageUrl;
 
-                // Get restaurant
-                return db.collection('Restaurants')
-                    .where("userId", "==", user.uid)
-                    .get()
-            })
-            .then((doc) => {
-                user.restaurantId = doc.docs[0] ? doc.docs[0].id : null;
-                resolve(user);
-            })
-            .catch((err) => {
-                resolve(undefined);
-            });
+            // Get restaurant
+            const restaurantQuery = query(
+                collection(db, 'Restaurants'),
+                where("userId", "==", user.uid)
+            );
+            const userRestaurants = await getDocs(restaurantQuery)
+            user.restaurantId = userRestaurants.docs[0] ? userRestaurants.docs[0].id : null;
+
+            // Return user
+            resolve(user);
+        } catch(err) {
+            console.log (err)
+            resolve(undefined);
+        };
     });
 };

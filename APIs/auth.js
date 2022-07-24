@@ -1,37 +1,51 @@
-const { signInWithEmailAndPassword, createUserWithEmailAndPassword } = require("firebase/auth");
-const { getAuth } = require("firebase/auth");
+const { 
+    signInWithEmailAndPassword, 
+    createUserWithEmailAndPassword,
+    signOut
+} = require("firebase/auth");
 const config = require("../utils/config")
 const { validateLoginData, validateSignUpData } = require('../utils/validators');
-//const { app, auth } = require('../utils/admin');
+const { auth, adminAuth } = require('../utils/admin');
+const { connectStorageEmulator } = require("firebase/storage");
 
 exports.loginUser = async (request, response) => {
-    const { initializeApp } = require("firebase/app");
-    const firebase = initializeApp(config);
-    const auth = getAuth();
-
+    //
     let user = {
         email: request.body.email,
 		password: request.body.password
 	}
 	const { valid, errors } = validateLoginData(user);
 	if (!valid) return response.status(400).json(errors);
-    //console.log(signInWithEmailAndPassword(auth, user.email, user.password))
-    signInWithEmailAndPassword(auth, user.email, user.password)
-    .then(async (data) => {
-        user = {
-            ...user,
-            ...data.user,
-        }
-        
-        return data.user.getIdToken(true);
-    })
-    .then((token) => {
-        return response.json({ ...user, token });
-    })
-    .catch((error) => {
-        console.error(error);
-        return response.status(403).json({ general: 'wrong credentials, please try again' });
-    })
+
+    // Sign in with email/password provider
+    const userData = await signInWithEmailAndPassword(auth, user.email, user.password)
+        .catch((error) => {
+            console.error(error);
+            return response.status(403).json({ general: 'wrong credentials, please try again' });
+        })
+    user = {
+        ...user,
+        ...userData.user
+    }
+    // const test = await adminAuth.getUserByEmail(user.email);
+    // console.log(test.customClaims)
+    // await adminAuth.setCustomUserClaims(user.uid, {
+    //     admin: true
+    // })
+
+    const token = await userData.user.getIdToken(true);
+    return response.json({ ...user, token });
+};
+
+exports.logoutUser = async (request, response) => {
+    await signOut(auth)
+        .catch((error) => {
+            console.error(error);
+            return response.status(403).json({ general: 'wrong credentials, please try again' });
+        });
+
+    //
+    return response.json({message: 'success'});
 };
 
 exports.createUser = (request, response) => {
