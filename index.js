@@ -12,7 +12,7 @@ const { db } = require('./utils/admin');
 // const app = initializeApp(config);
 // const auth = getAuth();
 //const { admin, db } = require('./utils/admin');
-const auth = require("./utils/auth");
+const { isAuthenticated, isAuthorizated } = require("./utils/auth");
 const { updateDealStatus } = require("./utils/update-deal-status");
 const {
   updateReservationStatus,
@@ -94,7 +94,10 @@ const {
   getRestaurantDeal,
   getRestaurantDeals,
   getRestaurantGallery,
-  searchRestaurants
+  searchRestaurants,
+  editRestaurant: editRestaurantGeneral,
+  createRestaurant: createRestaurantGeneral,
+  deleteRestaurant: deleteRestaurantGeneral
 } = require("./APIs/restaurants");
 
 const {
@@ -111,13 +114,14 @@ const {
   removeFavorite,
 } = require("./APIs/favorites");
 
-const { loginUser } = require("./APIs/auth");
+const { loginUser, logoutUser } = require("./APIs/auth");
 const { get } = require("firebase/database");
 
 app.post("/auth/login", loginUser);
+app.post("/auth/logout", logoutUser);
 
 app.post("/user", createUser);
-app.get("/user", auth, getCurrentUser);
+app.get("/user", isAuthenticated, getCurrentUser);
 //app.get('/user/:userId', getUser);
 app.put("/user/:userId/edit", editUser);
 app.get("/user/:userId/favorites", getUserFavorites);
@@ -125,47 +129,50 @@ app.get("/user/:userId/deals", getUserDeals);
 app.get("/user/:userId/restaurants", getUserRestaurants);
 app.get("/user/:email/available", isUsernameAvailable);
 
-app.get("/reservations/:reservationId", auth, getReservation);
-app.post("/reservations", auth, createReservation);
-app.delete("/reservations/:reservationId", auth, cancelReservation);
+app.get("/reservations/:reservationId", isAuthenticated, getReservation);
+app.post("/reservations", isAuthenticated, createReservation);
+app.delete("/reservations/:reservationId", isAuthenticated, cancelReservation);
 
-app.get("/partner/restaurant", auth, getPartnerRestaurant);
-app.put("/partner/restaurant", auth, editRestaurant);
-app.get("/partner/deals", auth, getDeals);
-app.get("/partner/deal/:dealId", auth, getDeal);
-app.put("/partner/deal/:dealId", auth, updateDeal);
-app.delete("/partner/deal/:dealId", auth, deleteDeal);
-app.post("/partner/deal", auth, createDeal);
-app.get("/partner/reservations", auth, getReservationsList);
-app.post("/partner/createQR", auth, createQR);
+app.get("/partner/restaurant", isAuthenticated, getPartnerRestaurant);
+app.put("/partner/restaurant", isAuthenticated, editRestaurant);
+app.get("/partner/deals", isAuthenticated, getDeals);
+app.get("/partner/deal/:dealId", isAuthenticated, getDeal);
+app.put("/partner/deal/:dealId", isAuthenticated, updateDeal);
+app.delete("/partner/deal/:dealId", isAuthenticated, deleteDeal);
+app.post("/partner/deal", isAuthenticated, createDeal);
+app.get("/partner/reservations", isAuthenticated, getReservationsList);
+app.post("/partner/createQR", isAuthenticated, createQR);
 
 app.get("/categories", getCategories);
-app.post("/categories", auth, createCategory);
+app.post("/categories", isAuthenticated, createCategory);
 
-app.get("/restaurant/menus", auth, getRestaurantMenus);
-app.post("/restaurant/menus", auth, postRestaurantMenu);
-app.post("/restaurant/photos", auth, postRestaurantPhoto);
-app.post("/restaurant/image", auth, uploadRestaurantProfilePhoto);
-app.post("/restaurant/create", auth, createRestaurant);
+app.get("/restaurant/menus", isAuthenticated, getRestaurantMenus);
+app.post("/restaurant/menus", isAuthenticated, postRestaurantMenu);
+app.post("/restaurant/photos", isAuthenticated, postRestaurantPhoto);
+app.post("/restaurant/image", isAuthenticated, uploadRestaurantProfilePhoto);
+app.post("/restaurant/create", isAuthenticated, createRestaurant);
 app.get(
   "/restaurant/:restaurantName/available-name",
   isRestaurantNameAvailable
 );
 
 app.get("/restaurants", getRestaurants);
+app.post("/restaurant", isAuthenticated, createRestaurantGeneral);
 app.get("/restaurant/:restaurantId", getRestaurant);
+app.delete("/restaurant/:restaurantId", deleteRestaurantGeneral);
+app.put("/restaurant/:restaurantId", isAuthenticated, editRestaurantGeneral); //, isAuthorizated({hasRole: ['super_admin']}),
 app.get("/restaurant/:restaurantId/deals", getRestaurantDeals);
 app.get("/restaurant/:restaurantId/deals/:dealId", getRestaurantDeal);
 app.get("/restaurant/:restaurantId/photos", getRestaurantGallery);
 
 // Deals
-app.post("/deals/redeem", auth, redeemDeal);
-app.get("/deals/qr-scan/:restaurantId", auth, findDeal);
+app.post("/deals/redeem", isAuthenticated, redeemDeal);
+app.get("/deals/qr-scan/:restaurantId", isAuthenticated, findDeal);
 
 // Favorites
-app.get("/favorites", auth, getFavorites);
-app.post("/favorites/:restaurantId", auth, addFavorite);
-app.delete("/favorites/:restaurantId", auth, removeFavorite);
+app.get("/favorites", isAuthenticated, getFavorites);
+app.post("/favorites/:restaurantId", isAuthenticated, addFavorite);
+app.delete("/favorites/:restaurantId", isAuthenticated, removeFavorite);
 
 // Search
 app.post("/search/:indexName/query", searchRestaurants);
@@ -173,9 +180,9 @@ app.post("/search/:indexName/query", searchRestaurants);
 // Utils
 app.post("/import/restaurants", importRestaurants);
 app.put("/update/restaurants", updateAllRestaurants);
-//app.post('/deals/deleteAllDeals', auth, deleteAllDeals); // <------ DAnGEROUS UTILITY
-// app.get('/deals-status', auth, updateDealStatus) // <-- UTILITY
-// app.get('/reservation-status', auth, updateReservationStatus); // <-- UTILITY
+//app.post('/deals/deleteAllDeals', isAuthenticated, deleteAllDeals); // <------ DAnGEROUS UTILITY
+// app.get('/deals-status', isAuthenticated, updateDealStatus) // <-- UTILITY
+// app.get('/reservation-status', isAuthenticated, updateReservationStatus); // <-- UTILITY
 
 //
 exports.api = functions.https.onRequest(app);
