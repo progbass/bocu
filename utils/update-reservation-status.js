@@ -12,7 +12,7 @@ dayjs.tz.setDefault("America/Mexico_City")
 const RESERVATION_TOLERANCE_MINUTES = 15;
 
 //
-exports.updateReservationStatus = async (request, response, next) => {
+exports.updateReservationStatus = async (context) => {
         // Consistent timestamp
         const now = dayjs();
         const nowWithTolerance = now.subtract(RESERVATION_TOLERANCE_MINUTES, 'minutes').toDate();
