@@ -347,91 +347,97 @@ exports.deleteRestaurant = async (request, response) => {
 }
 // CREATE RESTAURANT
 exports.createRestaurant = async (request, response) => {
-    const restaurantCollection = collection(db, 'Restaurants');
-  
-    // Validate that restaurant does not exists.
-    const existingRestaurant = await getDocs(query(
-        restaurantCollection,
-        where('name', '==', request.body.name)
-    ));
-    if(existingRestaurant.size > 0){
-        return response.status(409).json({ error: 'Restaurant already exists.' });
-    }
-  
-    // Validate that restaurant does not exists.
-    const currentUserRestaurant = await getDocs(query(
-        restaurantCollection,
-        where('userId', '==', request.user.uid)
-    ));
-    if(currentUserRestaurant.size > 0){
-        return response.status(403).json({ error: 'User already have a restaurant.' });
-    }
-  
-    // Create restaurant.
-    const newRestaurantItem = {
-        name: request.body.name,
-        categories: [],
-        qrCode: '',
-        photo: '',
-        avatar: '',
-        rating: 0,
-        location: {},
-        address: '',
-        phone: '',
-        description: '',
-        instagram: '',
+    try{
+        const restaurantCollection = collection(db, 'Restaurants');
     
-        ...request.body,
-        slug: slugify(request.body.name?.toLowerCase()),
-        active: false,
-        isApproved: false,
-        hasMinimumRequirements: false,
-        email: request.user.email,
-        userId: request.user.uid,
-        createdAt: dayjs().toDate(),
-    };
+        // Validate that restaurant does not exists.
+        const existingRestaurant = await getDocs(query(
+            restaurantCollection,
+            where('name', '==', request.body.name)
+        ));
+        if(existingRestaurant.size > 0){
+            return response.status(409).json({ error: 'Restaurant already exists.' });
+        }
     
-    const documentRef = await addDoc(
-        restaurantCollection,
-        newRestaurantItem
-    ).catch((err) => {
-        console.error(err);
-        return response.status(500).json({ error: err.code });
-    })
+        // Validate that restaurant does not exists.
+        const currentUserRestaurant = await getDocs(query(
+            restaurantCollection,
+            where('userId', '==', request.user.uid)
+        ));
+        if(currentUserRestaurant.size > 0){
+            return response.status(403).json({ error: 'User already have a restaurant.' });
+        }
+    
+        // Create restaurant.
+        const newRestaurantItem = {
+            name: request.body.name,
+            categories: [],
+            qrCode: '',
+            photo: '',
+            avatar: '',
+            rating: 0,
+            location: {},
+            address: '',
+            phone: '',
+            description: '',
+            instagram: '',
+        
+            ...request.body,
+            slug: slugify(request.body.name?.toLowerCase()),
+            active: false,
+            isApproved: false,
+            hasMinimumRequirements: false,
+            email: request.user.email,
+            userId: request.user.uid,
+            createdAt: dayjs().toDate(),
+        };
+        
+        const documentRef = await addDoc(
+            restaurantCollection,
+            newRestaurantItem
+        ).catch((err) => {
+            console.error(err);
+            return response.status(500).json({ error: err.code });
+        })
 
-    // Get new document
-    const documentSnapshot = await getDoc(documentRef);
+        // Get new document
+        const documentSnapshot = await getDoc(documentRef);
 
-    // Evaluate if restaurant has
-    // the minimum requirements defined by the business
-    const hasMinimumRequirements = !hasMissingRequirements(documentSnapshot.data());
+        // Evaluate if restaurant has
+        // the minimum requirements defined by the business
+        const hasMinimumRequirements = !hasMissingRequirements(documentSnapshot.data());
 
-    // Generate QR code
-    const qrRef = storageRef(
-        storage, 
-        `Restaurants/${documentSnapshot.data().slug}/qr_${
-            documentRef.id
-            }-${new Date().getTime()}.png`
-    );
-    let publicUrl = await generateQR(
-        documentRef.id,
-        qrRef
-    ); 
-    publicUrl = await getDownloadURL(qrRef);
+        // Generate QR code
+        const qrRef = storageRef(
+            storage, 
+            `Restaurants/${documentSnapshot.data().slug}/qr_${
+                documentRef.id
+                }-${new Date().getTime()}.png`
+        );
+        let publicUrl = await generateQR(
+            documentRef.id,
+            qrRef
+        ); 
+        publicUrl = await getDownloadURL(qrRef);
 
-    // Update restaurant info
-    await updateDoc( documentRef, {
-        qrCode: publicUrl,
-        hasMinimumRequirements
-    });
+        // Update restaurant info
+        await updateDoc( documentRef, {
+            qrCode: publicUrl,
+            hasMinimumRequirements
+        });
 
-    // return new document
-    const updatedDocument = await getDoc(documentRef);
-    const responseItem = {
-        id: documentRef.id,
-        ...updatedDocument.data(),
-    };
-    return response.json(responseItem);
+        // return new document
+        const updatedDocument = await getDoc(documentRef);
+        const responseItem = {
+            id: documentRef.id,
+            ...updatedDocument.data(),
+        };
+        return response.json(responseItem);
+    } catch(err) {
+        return response.status(500).json({
+            error: err
+        });
+    }
 };
 
 

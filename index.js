@@ -77,8 +77,6 @@ const {
 
   getReservationsList,
 
-  getCategories,
-  createCategory,
   createQR,
 
   getRestaurantMenus,
@@ -87,6 +85,11 @@ const {
   importRestaurants,
   updateAllRestaurants
 } = require("./APIs/partners");
+
+const {
+  getCategories,
+  createCategory
+} = require('./APIs/categories');
 
 const {
   getRestaurant,
