@@ -1,4 +1,4 @@
-const { db, app } = require('../utils/admin');
+const { adminDb } = require('../utils/admin');
 const dayjs = require('dayjs');
 var utc = require('dayjs/plugin/utc');
 var timezone = require('dayjs/plugin/timezone');
@@ -11,10 +11,9 @@ dayjs.tz.setDefault("America/Mexico_City")
 //
 exports.updateDealStatus = async (context) => {
     // Consistent timestamp
-    const now = app.firestore.Timestamp.now();
+    const now = dayjs();
 
-    // Get expired deals
-    const dealsCollectionRef = db.collection('Deals')
+    const dealsCollectionRef = adminDb.collection('Deals')
         .where('expiresAt', '<=', now.toDate())
         .where('active', '==', true);
     const dealsCollection = await dealsCollectionRef.get();
@@ -26,5 +25,5 @@ exports.updateDealStatus = async (context) => {
     }
     
     //
-    return
+    return null
 };
