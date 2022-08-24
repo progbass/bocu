@@ -1,11 +1,25 @@
 const functions = require("firebase-functions");
-const { ref, uploadBytes, uploadString } = require("firebase/storage");
-const { generateQrCode } = require("../utils/qr-code");
-const { db, app, auth, storage } = require("../utils/admin");
+const { 
+  Timestamp, 
+  addDoc, 
+  getDoc, 
+  getDocs, 
+  doc, 
+  collection,
+  query, 
+  where,
+  deleteDoc,
+  updateDoc,
+  startAfter,
+  startAt,
+  endAt,
+  limit,
+  orderBy
+} = require("firebase/firestore");
+const { db, admin, storage } = require("../utils/admin");
 const config = require("../utils/config");
 const slugify = require("slugify");
 const busboy = require("busboy");
-const queryString = require("query-string");
 const path = require("path");
 const os = require("os");
 const fs = require("fs");
@@ -15,6 +29,9 @@ const dayjs = require("dayjs");
 var utc = require("dayjs/plugin/utc");
 var timezone = require("dayjs/plugin/timezone");
 const { bucket } = require("firebase-functions/v1/storage");
+const { ref, uploadBytes } = require("firebase/storage");
+const { RESERVATION_STATUS } = require('../utils/reservations-utils');
+const { MAX_CATEGORIES } = require('../utils/app-config');
 
 // Config Algolia SDK
 const algoliaClient = algoliasearch(
@@ -28,36 +45,32 @@ dayjs.extend(utc);
 dayjs.extend(timezone);
 
 // Config
+const PAGINATION_CONFIG = {
+  LIMIT: 100,
+  CURRENT: 1,
+  DEFAULT: 1
+}
 const DEAL_EXPIRY_DEFAULT_OFFSET_HOURS = 2;
 const UTC_OFFSET = -5;
-const RESERVATION_STATUS = {
-  AWAITING_CUSTOMER: 1,
-  USER_CANCELED: 2,
-  TOLERANCE_TIME: 3,
-  RESERVATION_EXPIRED: 4, 
-  RESERVATION_FULFILLED: 5,
-  RESTAURANT_CANCELED: 6,
-  OTHER: 7,
-  DEAL_EXPIRED: 8,
-  DEAL_CANCELED: 9
-}
 
 //
 exports.createRestaurant = async (request, response) => {
-  const restaurantCollection = db.collection("Restaurants");
+  const restaurantCollection = collection(db, 'Restaurants');
 
   // Validate that restaurant does not exists.
-  const existingRestaurant = await restaurantCollection
-    .where('name', '==', request.body.name)
-    .get();
+  const existingRestaurant = await getDocs(query(
+    restaurantCollection,
+    where('name', '==', request.body.name)
+  ));
   if(existingRestaurant.size > 0){
     return response.status(409).json({ error: 'Restaurant already exists.' });
   }
 
   // Validate that restaurant does not exists.
-  const currentUserRestaurant = await restaurantCollection
-    .where('userId', '==', request.user.uid)
-    .get();
+  const currentUserRestaurant = await getDocs(query(
+    restaurantCollection,
+    where('userId', '==', request.user.uid)
+  ));
   if(currentUserRestaurant.size > 0){
     return response.status(403).json({ error: 'User already have a restaurant.' });
   }
@@ -85,11 +98,12 @@ exports.createRestaurant = async (request, response) => {
     userId: request.user.uid,
     createdAt: dayjs().toDate(),
   };
-  restaurantCollection
-    .add(newRestaurantItem)
-    .then((documentRef) => {
+  addDoc(
+    restaurantCollection,
+    newRestaurantItem
+  ).then(async (documentRef) => {
       // Get new document
-      documentRef.get().then(async (documentSnapshot) => {
+      getDoc(documentRef).then(async (documentSnapshot) => {
         // Evaluate if restaurant has
         // the minimum requirements defined by the business
         const hasMinimumRequirements = !hasMissingRequirements(documentSnapshot.data());
@@ -103,13 +117,13 @@ exports.createRestaurant = async (request, response) => {
         );
 
         // Update restaurant info
-        await documentRef.update({
+        await updateDoc(documentRef, {
           qrCode: publicUrl,
           hasMinimumRequirements
         });
 
         // return new document
-        const updatedDocument = await documentRef.get();
+        const updatedDocument = await getDoc(documentRef);
         const responseItem = {
           id: documentRef.id,
           ...updatedDocument.data(),
@@ -123,28 +137,39 @@ exports.createRestaurant = async (request, response) => {
     });
 };
 exports.editRestaurant = async (request, response) => {
-  let restaurantReference = db
-    .collection("Restaurants")
-    .doc(`${request.user.restaurantId}`);
-  let restaurant = await restaurantReference.get();
+  let restaurantReference = doc(db, 'Restaurants', request.user.restaurantId);
+  let restaurant = await getDoc(restaurantReference);
 
   // Validate that restaurant exists.
-  if(!restaurant.exists){
+  if(!restaurant.exists()){
       response.status(404).json({message: 'User restaurant not found.'});
+  }
+
+  // Limit number of categories
+  let categories = restaurant.data().categories;
+  if(request.body.categories){
+    categories = request.body.categories;
+    if(categories.length > MAX_CATEGORIES){
+      response.status(409).json({message: `Exceeded maximum categories of [${MAX_CATEGORIES}]`});
+    }
   }
   
   // Update document.
-  await restaurantReference
-    .update(request.body)
-    .catch((err) => {
-      console.error(err);
-      return response.status(500).json({
-        error: err.code,
-      });
+  await updateDoc(
+    restaurantReference,
+    {
+      ...request.body,
+      categories
+    }
+  ).catch((err) => {
+    console.error(err);
+    return response.status(500).json({
+      error: err.code,
     });
+  });
   
   // Get updated record
-  restaurant = await restaurantReference.get();
+  restaurant = await getDoc(restaurantReference);
   let restaurantData = restaurant.data();
 
   // Evaluate if restaurant has
@@ -152,17 +177,18 @@ exports.editRestaurant = async (request, response) => {
   const hasMinimumRequirements = !hasMissingRequirements(restaurantData);
   
   // Update restaurant 'minimum requirements' property
-  await restaurantReference
-    .update({ hasMinimumRequirements })
-    .catch((err) => {
-      console.error(err);
-      return response.status(500).json({
-        error: err.code,
-      });
+  await updateDoc(
+    restaurantReference,
+    { hasMinimumRequirements }
+  ).catch((err) => {
+    console.error(err);
+    return response.status(500).json({
+      error: err.code,
     });
+  });
 
   // Get updated record
-  restaurant = await restaurantReference.get();
+  restaurant = await getDoc(restaurantReference);
 
   // Response
   response.json(restaurant.data());
@@ -171,7 +197,7 @@ exports.editRestaurant = async (request, response) => {
 // Create deal
 exports.createDeal = async (request, response) => {
   // Define expiry date settings
-  const createdAt = dayjs.utc().utcOffset(UTC_OFFSET);
+  const createdAt = dayjs()//.utcOffset(UTC_OFFSET);
 
   let expiryTimeParts = request.body.expiresAt
     ? request.body.expiresAt
@@ -188,17 +214,17 @@ exports.createDeal = async (request, response) => {
   const startsAt = createdAt
     .set("hour", startTimeParts[0])
     .set("minutes", startTimeParts[1]);
-
-  // Create deal.
+    
+    // Create deal.
   let newDealItem = {
     userId: request.user.uid,
     restaurantId: request.user.restaurantId,
-    createdAt: app.firestore.Timestamp.fromDate(createdAt.toDate()),
+    createdAt: new Timestamp(createdAt.unix()),
     dealType: Number(request.body.dealType),
     details: request.body.details ? request.body.details : "",
     discount: request.body.discount > 0 ? request.body.discount : 0,
-    startsAt: app.firestore.Timestamp.fromDate(startsAt.toDate()),
-    expiresAt: app.firestore.Timestamp.fromDate(expiresAt.toDate()),
+    startsAt: new Timestamp(startsAt.unix()),
+    expiresAt: new Timestamp(expiresAt.unix()),
     include_drinks: request.body.include_drinks || false,
     useCount: 0,
     useMax: Number(request.body.useMax),
@@ -207,14 +233,14 @@ exports.createDeal = async (request, response) => {
   };
 
   // Get restaurant
-  let collectionRef = db.collection("Restaurants")
-    .where("userId", "==", request.user.uid);
-  let document = await collectionRef.get()
-    .catch((err) => {
-      return response.status(500).json({
-        error: err.code,
-      });
+  let document = await getDocs(query(
+    collection(db, 'Restaurants'),
+    where('userId','==', request.user.uid)
+  )).catch((err) => {
+    return response.status(500).json({
+      error: err.code,
     });
+  });
     
   // No restaurant found.
   if (document.size < 1) {
@@ -223,7 +249,7 @@ exports.createDeal = async (request, response) => {
     });
   }
 
-  // Get last restaurant.
+  // Get latest restaurant.
   let restaurant = document.docs[document.size - 1];
   newDealItem = {
     restaurantId: restaurant.id,
@@ -231,103 +257,158 @@ exports.createDeal = async (request, response) => {
   };
 
   //
-  db.collection("Deals")
-    .add(newDealItem)
-    .then(async (documentRef) => {
-      const doc = await documentRef.get();
-      return response.json({
-        ...newDealItem,
-        id: doc.id,
-        startsAt: dayjs
-          .unix(doc.data().startsAt.seconds)
-          .utcOffset(UTC_OFFSET)
-          .format("HH:mm"),
-        expiresAt: dayjs
-          .unix(doc.data().expiresAt.seconds)
-          .utcOffset(UTC_OFFSET)
-          .format("HH:mm"),
-        createdAt: dayjs
-          .unix(doc.data().createdAt.seconds)
-          .utcOffset(UTC_OFFSET),
-      });
-    })
-    .catch((err) => {
-      console.error(err);
-      return response.status(500).json({ error: err.code });
-    });
+  const documentRef = await addDoc(
+    collection(db, 'Deals'),
+    newDealItem
+  ).catch((err) => {
+    console.error(err);
+    return response.status(500).json({ error: err.code });
+  });
+
+  const doc = await getDoc(documentRef);
+  return response.json({
+    ...newDealItem,
+    id: doc.id,
+    startsAt: dayjs
+      .unix(doc.data().startsAt.seconds)
+      .utcOffset(UTC_OFFSET)
+      .format("HH:mm"),
+    expiresAt: dayjs
+      .unix(doc.data().expiresAt.seconds)
+      .utcOffset(UTC_OFFSET)
+      .format("HH:mm"),
+    createdAt: dayjs
+      .unix(doc.data().createdAt.seconds)
+      .utcOffset(UTC_OFFSET),
+  });
 };
 // Get Deals List
 exports.getDeals = async (request, response) => {
   // Build query
-  let collectionReference = db
-    .collection(`Deals`)
-    .where("restaurantId", "==", request.user.restaurantId);
+  const filtersList = [where("restaurantId", "==", request.user.restaurantId)];
 
   // Filter by 'active' state (true by default)
-  if(request.query?.active){
+  if(request.query.active && request.query.active != ''){
     let filterActive = request.query?.active && request.query?.active == 'false' ? false : true;
-    collectionReference = collectionReference.where("active", "==", filterActive);
+    filtersList.push(where("active", "==", filterActive));
+  }
+
+  // Filter by date range
+  let range_init = request.query.range_init;
+  if (range_init && range_init != '') {
+    if(dayjs(range_init).isValid()){
+    range_init = dayjs(dayjs(range_init).toISOString())
+      //.utcOffset(UTC_OFFSET, true)
+      .toDate()
+      filtersList.push(where(
+        "createdAt",
+        ">=",
+        Timestamp.fromDate(range_init)
+      ))
+    }
+  }
+  let range_end = request.query.range_end;
+  if (range_end && range_end != '') {
+    if(dayjs(range_end).isValid()){
+      range_end = dayjs(range_end)
+        .hour(23)
+        .minute(59)
+        .second(59)
+        //.utcOffset(UTC_OFFSET, true)
+        .toDate()
+      filtersList.push(where(
+        "createdAt", 
+        "<=", 
+        Timestamp.fromDate(range_end)
+      ))
+    }
   }
 
   // Get collection
-  //collectionReference = collectionReference.orderBy('createdAt', 'desc');
-  const collection = await collectionReference.get().catch((err) => {
-    return response.status(500).json({
-      error: err.code,
-    });
-  });
+  let collectionQuery = query(
+    collection(db, `Deals`),
+    ...filtersList,
+    // orderBy(request.params.o || 'createdAt', 'desc'),
+    limit(PAGINATION_CONFIG.LIMIT)
+  );
+  
+  // Get the last visible document
+  // const documentSnapshots = await getDocs(collectionQuery);
+  // const lastVisible = documentSnapshots.docs[documentSnapshots.docs.length-1];
+
+  // collectionQuery = query(
+  //   collection(db, `Deals`),
+  //   ...filtersList,
+  //   orderBy(request.params.o || 'createdAt', 'desc'),
+  //   startAt(lastVisible),
+  //   limit(PAGINATION_CONFIG.LIMIT)
+  // );
+
+  const dealsList = await getDocs(collectionQuery)
 
   // Response
-  if (collection.size > 0) {
+  if (dealsList.size > 0) {
     let deals = [];
-    collection.forEach((doc) => {
+
+    for(const deal of dealsList.docs){
+      // Get deal's restaurant
+      const restaurant = await getDoc(doc(db, `Restaurants/${deal.get('restaurantId') }`))
+        .catch(err => {
+          console.error(err);
+          return response.status(500).json({
+            error: err.code,
+          });
+        })
+
+      //
       deals.push({
-        ...doc.data(),
-        id: doc.id,
+        ...deal.data(),
+        restaurant: restaurant.get('name'),
+        id: deal.id,
         startsAt: dayjs
-          .unix(doc.data().startsAt?.seconds)
+          .unix(deal.data().startsAt?.seconds)
           .utcOffset(UTC_OFFSET)
           .format("HH:mm"),
         expiresAt: dayjs
-          .unix(doc.data().expiresAt?.seconds)
+          .unix(deal.data().expiresAt?.seconds)
           .utcOffset(UTC_OFFSET)
           .format("HH:mm"),
         createdAt: dayjs
-          .unix(doc.data().createdAt?.seconds)
+          .unix(deal.data().createdAt?.seconds)
           .utcOffset(UTC_OFFSET),
-      });
-    });
+      });  
+    };
+
     return response.json(deals);
   } else {
-    return response.status(204).json({
-      error: "No deals were found.",
-    });
-  }
+
+    return response.json([]);
+  } 
 };
 // Get Deal
 exports.getDeal = async (request, response) => {
-  console.log(request.params.dealId);
-  const docRef = db.doc(`Deals/${request.params.dealId}`);
-  const docSnap = await docRef.get().catch((err) => {
+  const docSnap = await getDoc(
+    doc(db, `Deals/${request.params.dealId}`)
+  ).catch((err) => {
     return response.status(500).json({
       error: err.code,
     });
   });
 
-  if (docSnap.exists) {
+  if (docSnap.exists()) {
     return response.json({
       id: docSnap.id,
       ...docSnap.data(),
       startsAt: dayjs
-        .unix(docSnap.data().startsAt.seconds)
+        .unix(docSnap.data().startsAt?.seconds)
         .utcOffset(UTC_OFFSET)
         .format("HH:mm"),
       expiresAt: dayjs
-        .unix(docSnap.data().expiresAt.seconds)
+        .unix(docSnap.data().expiresAt?.seconds)
         .utcOffset(UTC_OFFSET)
         .format("HH:mm"),
       createdAt: dayjs
-        .unix(docSnap.data().createdAt.seconds)
+        .unix(docSnap.data().createdAt?.seconds)
         .utcOffset(UTC_OFFSET),
     });
   } else {
@@ -338,16 +419,22 @@ exports.getDeal = async (request, response) => {
 };
 // Update deal
 exports.updateDeal = async (request, response) => {
-  const docRef = db.doc(`Deals/${request.params.dealId}`);
-  const deal = await docRef.get();
-  if (!deal.exists) {
+  const docRef = doc(db, `Deals/${request.params.dealId}`);
+  const deal = await getDoc(docRef).catch(err => {
+    console.log(err);
+    return response.status(500).json({
+      error: err,
+    });
+  });
+  if (!deal.exists()) {
     return response.status(400).json({
       error: "Deal not found.",
     });
   }
 
   //
-  const updateObject = request.body;
+  const {createdAt, ...updateObject} = request.body;
+  
 
   // Transform hh:mm into a valid date before storing into database
   if (updateObject.startsAt) {
@@ -363,7 +450,7 @@ exports.updateDeal = async (request, response) => {
     // ToDo: Validate date or return error
 
     // Overwrite original data
-    updateObject.startsAt = app.firestore.Timestamp.fromDate(startsAt.toDate());
+    updateObject.startsAt = Timestamp.fromDate(startsAt.toDate());
   }
   if (updateObject.expiresAt) {
     const currentExpiryTime = dayjs
@@ -378,55 +465,53 @@ exports.updateDeal = async (request, response) => {
     // ToDo: Validate date or return error
 
     // Overwrite original data
-    app.firestore.Tim;
-    updateObject.expiresAt = app.firestore.Timestamp.fromDate(
+    updateObject.expiresAt = Timestamp.fromDate(
       expiresAt.toDate()
     );
   }
 
   // Update record
-  docRef
-    .update(updateObject)
-    .then(() => {
-      docRef.get().then((documentSnapshot) => {
-        response.json({
-          ...documentSnapshot.data(),
-          startsAt: dayjs
-            .unix(documentSnapshot.data().startsAt.seconds)
-            .utcOffset(UTC_OFFSET)
-            .format("HH:mm"),
-          expiresAt: dayjs
-            .unix(documentSnapshot.data().expiresAt.seconds)
-            .utcOffset(UTC_OFFSET)
-            .format("HH:mm"),
-          createdAt: dayjs
-            .unix(documentSnapshot.data().createdAt.seconds)
-            .utcOffset(UTC_OFFSET),
-        });
-      });
-    })
-    .catch((err) => {
-      console.error(err);
-      return response.status(500).json({
-        error: err.code,
+  updateDoc(
+    docRef,
+    updateObject
+  ).then(() => {
+    getDoc(docRef).then((documentSnapshot) => {
+      response.json({
+        ...documentSnapshot.data(),
+        startsAt: dayjs
+          .unix(documentSnapshot.data().startsAt?.seconds)
+          .utcOffset(UTC_OFFSET)
+          .format("HH:mm"),
+        expiresAt: dayjs
+          .unix(documentSnapshot.data().expiresAt?.seconds)
+          .utcOffset(UTC_OFFSET)
+          .format("HH:mm"),
+        createdAt: dayjs
+          .unix(documentSnapshot.data().createdAt?.seconds)
+          .utcOffset(UTC_OFFSET),
       });
     });
+  }).catch((err) => {
+    console.error(err);
+    return response.status(500).json({
+      error: err.code,
+    });
+  });
 };
 // Delete deal
 exports.deleteDeal = async (request, response) => {
-  const docRef = db.doc(`Deals/${request.params.dealId}`);
+  const docRef = doc(db, `Deals/${request.params.dealId}`);
 
   // Verify that document exists
-  const deal = await docRef.get();
-  if(!deal.exists){
+  const deal = await getDoc(docRef);
+  if(!deal.exists()){
     return response.status(404).json({
       error: 'Deal not found.',
     });
   }
 
   // Delete from db
-  await docRef
-    .delete()
+  await deleteDoc(docRef)
     .catch((err) => {
       return response.status(500).json({
         error: err.code,
@@ -442,35 +527,33 @@ exports.deleteDeal = async (request, response) => {
 // Get Reservation List
 exports.getReservationsList = async (request, response) => {
   const todayDate = dayjs.utc().utcOffset(UTC_OFFSET);
-
-  // Get Deals collection
-  let collectionReference = db
-    .collection(`Reservations`)
-    .where("restaurantId", "==", request.user.restaurantId)
+  const filtersList = [
+    where("restaurantId", "==", request.user.restaurantId)
+  ];
 
   // Filter by 'active' state (true by default)
-  if(request.query.active){
+  if(request.query.active && request.query.active != ''){
     let filterActive = request.query?.active && request.query?.active == 'false' ? false : true;
-    collectionReference = collectionReference.where("active", "==", filterActive);
+    filtersList.push(where("active", "==", filterActive));
   }
 
   // Filter by date range
   let range_init = request.query.range_init;
-  if (range_init != undefined) {
+  if (range_init && range_init != '') {
     if(dayjs(request.query.range_init).isValid()){
     range_init = dayjs(dayjs(request.query.range_init).toISOString())
       //.utcOffset(UTC_OFFSET, true)
       .toDate()
 
-      collectionReference = collectionReference.where(
+      filtersList.push(where(
         "reservationDate",
         ">=",
-        app.firestore.Timestamp.fromDate(range_init)
-      )
+        Timestamp.fromDate(range_init)
+      ))
     }
   }
   let range_end = request.query.range_end;
-  if (range_end != undefined) {
+  if (range_end && range_end != '') {
     if(dayjs(request.query.range_end).isValid()){
       range_end = dayjs(request.query.range_end)
         .hour(23)
@@ -479,11 +562,11 @@ exports.getReservationsList = async (request, response) => {
         //.utcOffset(UTC_OFFSET, true)
         .toDate()
     
-      collectionReference = collectionReference.where(
+      filtersList.push(where(
         "reservationDate", 
         "<=", 
-        app.firestore.Timestamp.fromDate(range_end)
-      )
+        Timestamp.fromDate(range_end)
+      ))
     }
   }
 
@@ -516,31 +599,37 @@ exports.getReservationsList = async (request, response) => {
         statusCode = RESERVATION_STATUS.AWAITING_CUSTOMER;
         break;
     }
-    collectionReference = collectionReference.where("status", "==", statusCode);
+    filtersList.push(where("status", "==", statusCode));
   }
 
-  // Get collection results
-  collectionReference = collectionReference.orderBy('reservationDate', 'desc');
-  const collection = await collectionReference.get().catch((err) => {
+  // Get Deals collection results
+  let collectionQuery = query(
+    collection(db, `Reservations`),
+    ...filtersList,
+    orderBy('reservationDate', 'desc')
+  );
+  const collectionReference = await getDocs(collectionQuery).catch((err) => {
     return response.status(500).json({
       error: err,
     });
   });
 
   // Response
-  if (collection.size > 0) {
+  if (collectionReference.size > 0) {
     let deals = [];
-    for (doc of collection.docs) {
+    for (document of collectionReference.docs) {
+      const reservation = document.data();
+      
       // Get Deal
-      const dealReference = db.collection("/Deals/").doc(doc.data().dealId);
-      const dealSnap = await dealReference.get().catch((err) => {
+      const dealReference = doc(db, 'Deals', reservation.dealId);
+      const dealSnap = await getDoc(dealReference).catch((err) => {
         return response.status(500).json({
           error: err.code,
         });
       });
 
       // Confirm that the reservation is linked to a deal
-      if(!dealSnap.exists){
+      if(!dealSnap.exists()){
         continue;
       }
 
@@ -556,12 +645,11 @@ exports.getReservationsList = async (request, response) => {
       }
 
       // Get User
-      const userSnap = await auth.getUser(doc.data().customerId);
-      const user = userSnap.toJSON();
+      const user = request.user;
 
       // Determine status description
       let statusDescription = "Reservación activa";
-      switch (doc.data().status) {
+      switch (reservation.status) {
         case 2:
           statusDescription = "Reservación cancelada";
           break;
@@ -577,13 +665,13 @@ exports.getReservationsList = async (request, response) => {
       }
 
       deals.push({
-        id: doc.id,
-        ...doc.data(),
+        id: document.id,
+        ...reservation,
         statusDescription,
-        checkIn: doc.data().checkIn ? dayjs(doc.data().checkIn).toDate() : null,
-        createdAt: dayjs.unix(doc.data().createdAt.seconds).toDate(),
+        checkIn: reservation.checkIn ? dayjs(reservation.checkIn).toDate() : null,
+        createdAt: dayjs.unix(reservation.createdAt.seconds).toDate(),
         reservationDate: dayjs
-          .unix(doc.data().reservationDate.seconds)
+          .unix(reservation.reservationDate.seconds)
           .toDate(),
         dealType: dealSnap.data().dealType,
         dealDetails,
@@ -610,25 +698,27 @@ exports.createCategory = (request, response) => {
   };
 
   // Insert Category
-  db.collection("Categories")
-    .add(newCategoryItem)
-    .then((documentRef) => {
-      return response.json({
-        id: documentRef.id,
-        ...newCategoryItem,
-      });
-    })
-    .catch((err) => {
-      console.error(err);
-      return response.status(500).json({ error: err.code });
+  const categoriesCollection = collection(db, "Categories")
+  addDoc(
+    categoriesCollection,
+    newCategoryItem
+  ).then((documentRef) => {
+    return response.json({
+      id: documentRef.id,
+      ...newCategoryItem,
     });
+  }).catch((err) => {
+    console.error(err);
+    return response.status(500).json({ error: err.code });
+  });
 };
 // Get Categories
 exports.getCategories = async (request, response) => {
   // Get Deals collection
-  const collection = await db
-    .collection(`Categories`)
-    .get()
+  const dealsQuery = query(
+    collection(`Categories`)
+  )
+  const deals = await getDocs(dealsQuery)
     .catch((err) => {
       return response.status(500).json({
         error: err.code,
@@ -636,9 +726,9 @@ exports.getCategories = async (request, response) => {
     });
 
   // Response
-  if (collection.size > 0) {
+  if (deals.size > 0) {
     let categories = [];
-    collection.forEach((doc) => {
+    deals.forEach((doc) => {
       categories.push({
         ...doc.data(),
         id: doc.id,
@@ -655,20 +745,19 @@ exports.getCategories = async (request, response) => {
 // Get Menus
 exports.getRestaurantMenus = async (request, response) => {
   // Get Menus collection
-  const collection = await db
-    .collection(`RestaurantMenus`)
-    .where("restaurantId", "==", request.user.restaurantId)
-    .get()
-    .catch((err) => {
-      return response.status(500).json({
-        error: err.code,
-      });
+  const menus = await getDocs(query(
+    collection(db, `RestaurantMenus`),
+    where("restaurantId", "==", request.user.restaurantId)
+  )).catch((err) => {
+    return response.status(500).json({
+      error: err.code,
     });
+  });
 
   // Response
-  if (collection.size > 0) {
+  if (menus.size > 0) {
     let menus = [];
-    collection.forEach((doc) => {
+    menus.forEach((doc) => {
       menus.push({
         ...doc.data(),
         id: doc.id,
@@ -684,15 +773,16 @@ exports.getRestaurantMenus = async (request, response) => {
 // Post Menus
 exports.postRestaurantMenu = async (request, response) => {
   // Get restaurant document
-  const restaurantDocRef = db.doc(`/Restaurants/${request.user.restaurantId}`);
-  const restaurantDocument = (await restaurantDocRef.get()).data();
+  const restaurantDocRef = doc(db, `/Restaurants/`, request.user.restaurantId);
+  const restaurantDocument = (await getDoc(restaurantDocRef)).data();
 
   // Get Menus
-  const menusCollectionRef = db
-    .collection(`RestaurantMenus`)
-    .where("restaurantId", "==", request.user.restaurantId)
-    .where("active", "==", true);
-  const menusCollection = await menusCollectionRef.get().catch((err) => {
+  const menusCollectionRef = query(
+    collection(db, `RestaurantMenus`),
+    where("restaurantId", "==", request.user.restaurantId),
+    where("active", "==", true)
+  );
+  const menusCollection = await getDocs(menusCollectionRef).catch((err) => {
     return response.status(500).json({
       error: err.code,
     });
@@ -734,7 +824,7 @@ exports.postRestaurantMenu = async (request, response) => {
 
   // When finishing upload, store file on Firebase
   BB.on("finish", async () => {
-    const bucket = app.storage().bucket();
+    const bucket = admin.storage().bucket();
     const destination = `Restaurants/${restaurantDocument.slug}/Menus/${imageToBeUploaded.imageFileName}`;
     await bucket
       .upload(imageToBeUploaded.filePath, {
@@ -762,7 +852,7 @@ exports.postRestaurantMenu = async (request, response) => {
       file: fileURL,
       thumbnail: "",
     };
-    await db.collection(`RestaurantMenus`).add(newMenu);
+    await addDoc(collection(db, `RestaurantMenus`), newMenu);
 
     // Response
     const menusList = [];
@@ -777,15 +867,14 @@ exports.postRestaurantMenu = async (request, response) => {
 // Get Gallery
 exports.getRestaurantGallery = async (request, response) => {
   // Get Photos collection
-  const collection = await db
-    .collection(`RestaurantPhotos`)
-    .where("restaurantId", "==", request.user.restaurantId)
-    .get()
-    .catch((err) => {
-      return response.status(500).json({
-        error: err.code,
-      });
+  const collection = await getDocs(query(
+    collection(`RestaurantPhotos`),
+    where("restaurantId", "==", request.user.restaurantId)
+  )).catch((err) => {
+    return response.status(500).json({
+      error: err.code,
     });
+  });
 
   // Response
   if (collection.size > 0) {
@@ -806,15 +895,16 @@ exports.getRestaurantGallery = async (request, response) => {
 // Post Gallery Photo
 exports.postRestaurantPhoto = async (request, response) => {
   // Get restaurant document
-  const restaurantDocRef = db.doc(`/Restaurants/${request.user.restaurantId}`);
-  const restaurantDocument = (await restaurantDocRef.get()).data();
+  const restaurantDocRef = doc(db, `/Restaurants/`, request.user.restaurantId);
+  const restaurantDocument = (await getDoc(restaurantDocRef)).data();
 
   // Get Menus
-  const photosCollectionRef = db
-    .collection(`RestaurantPhotos`)
-    .where("restaurantId", "==", request.user.restaurantId)
-    .where("active", "==", true);
-  const photosCollection = await photosCollectionRef.get().catch((err) => {
+  const photosCollectionRef = query(
+    collection(`RestaurantPhotos`),
+    where("restaurantId", "==", request.user.restaurantId),
+    where("active", "==", true)
+  );
+  const photosCollection = await getDocs(photosCollectionRef).catch((err) => {
     return response.status(500).json({
       error: err.code,
     });
@@ -855,7 +945,7 @@ exports.postRestaurantPhoto = async (request, response) => {
 
   // When finishing upload, store file on Firebase
   BB.on("finish", async () => {
-    const bucket = app.storage().bucket();
+    const bucket = admin.storage().bucket();
     const destination = `Restaurants/${restaurantDocument.slug}/Gallery/${imageToBeUploaded.imageFileName}`;
     await bucket
       .upload(imageToBeUploaded.filePath, {
@@ -883,11 +973,11 @@ exports.postRestaurantPhoto = async (request, response) => {
       file: fileURL,
       thumbnail: "",
     };
-    await db.collection(`RestaurantPhotos`).add(newPhoto);
+    await addDoc(collection(db, `RestaurantPhotos`), newPhoto);
 
     // Response
     const photosList = [];
-    (await photosCollectionRef.get()).forEach((item) => {
+    (await getDocs(photosCollectionRef)).forEach((item) => {
       photosList.push({ ...item.data(), id: item.id });
     });
     return response.json(photosList);
@@ -896,7 +986,7 @@ exports.postRestaurantPhoto = async (request, response) => {
 };
 // Delete photo
 deleteImage = (imageName) => {
-  const bucket = app.storage().bucket();
+  const bucket = admin.storage().bucket();
   const path = `${imageName}`;
   return bucket
     .file(path)
@@ -913,10 +1003,11 @@ deleteImage = (imageName) => {
 exports.uploadRestaurantProfilePhoto2 = async (request, response) => {
   cors(request, response, async () => {
     // Get restaurant document
-    const restaurantDocRef = await db.doc(
+    const restaurantDocRef = doc(
+      db,
       `/Restaurants/${request.user.restaurantId}`
     );
-    const restaurantDocument = await (await restaurantDocRef.get()).data();
+    const restaurantDocument = await (await getDoc(restaurantDocRef)).data();
 
     // BusBoy
     const path = require("path");
@@ -955,7 +1046,7 @@ exports.uploadRestaurantProfilePhoto2 = async (request, response) => {
 
     // When finishing upload, store file on Firebase
     BB.on("finish", async () => {
-      const bucket = app.storage().bucket();
+      const bucket = admin.storage().bucket();
       const destination = `Restaurants/${restaurantDocument.slug}/Avatars/${imageToBeUploaded.imageFileName}`;
       await bucket
         .upload(imageToBeUploaded.filePath, {
@@ -976,7 +1067,8 @@ exports.uploadRestaurantProfilePhoto2 = async (request, response) => {
       // Update restaurant avatar URL
       const file = await bucket.file(destination);
       const fileURL = await file.publicUrl();
-      await restaurantDocRef.update({
+      await updateDoc(
+        restaurantDocRef, {
         photo: fileURL,
       });
 
@@ -990,15 +1082,16 @@ exports.uploadRestaurantProfilePhoto = async (request, response) => {
   response.set("Access-Control-Allow-Origin", "*");
   //cors(request, response, async () => {
   // Get restaurant document
-  const restaurantDocRef = await db.doc(
+  const restaurantDocRef = doc(db,
     `/Restaurants/${request.user.restaurantId}`
   );
-  let restaurantDocument = (await restaurantDocRef.get()).data();
+  let restaurantDocument = (await getDoc(restaurantDocRef)).data();
 
   // BusBoy
   const bb = busboy({ headers: request.headers });
 
   // Image config
+  let fileObject;
   let imageFileName;
   let imageToBeUploaded = {};
   const fileWrites = [];
@@ -1006,11 +1099,11 @@ exports.uploadRestaurantProfilePhoto = async (request, response) => {
   const base64File = "iVBORw0KGgoAAAANSUhEUgAAADAAAAAoCAYAAAC4h3lxAAAACXBIWXMAABYlAAAWJQFJUiTwAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAALaSURBVHgB1ZlNVhpBEMerukfN0iNwBDyBeALDiy6yiDqbGFbGEwRPELPI48lmJC7yXtQ35ASQE8gRyAnC2sdUpasRREDowQHp32Y+Xk9N/aeqa6ZrEBypRNeFIAi2CSgPDPn+eQRsI3Crm9DvUrjfhBRYm1rtMmKemXPWHnIHWHUSTv4AQXOWTYRZN/lxe6QQT4A5D7NpE8BZ6eDd5bRB1Vp8wkhls7sJL7T5rIBK9DOng43IPJkCpKdNyf1OKXzfHre5FjOjy8Nwsqkmjby4unmr9PrdnM4LOble7IzbnMv5iTaFsQjYAYwxZIRmPJJtgnwJWYFcPP6wV7e7w+clxKIS3HLTlU7G9qxNk05bkk5PUsg431jAzbK2Z21qvRHJziACttoAROARpjqFgwiYnS/gGRrw0EagGv3Ks9Z34CE2Al3QBfAUKyDQsA2e0psDyIuoFEvBCuDFlLqloMBzrADsvS29xApICP6Cp/TmAGELPOUhhchbAYNvoYva7T9z5Fc1Ynj8GjVr3W/gGYRwNhDwhoJzUQS+YHyVdfJAQBgWO0QUgifI05ftkxeZtDDMOnjlU4n4sUsxsStRvbppmMV3AVYQZG59PNzb6h9P/JRY6+qiWdivXmk1eb9Gemf41EQBvfmAxZWa1MYXIrUjvg2fntqZi6J4815xw8Rt3l5OJkjayJMfdV6Y+jUqF6wTSsjq8HrUn3NemNkb7VOpXZcVqqUu/KUifjrc+zxtjLMAYbki6PT4YP981qhUAgRpiSulInNlDhYBg7xQi66t+tQChEoU55SiRuYiHipNKSy2XS+Za0kpN1gntUXMNcgIsSU20zgvzBWBYbKZF275PokXCxC+R3E+UBSnTimbMhSm/TU1TCYChN684Nj1pcfITe7qMG3KjJKZgD4uKeVS313JXIBgW/UMX8eWqLZEwmkpnP4TMA0LESBISoFKygpwV45ZcSuLlBnlPxluQJqYt7wLAAAAAElFTkSuQmCC";
 
   const destination = `/Restaurants`; //${restaurantDocument.slug}/Avatars/${imageToBeUploaded.imageFileName}`;
-  //const storageRef = app.storage().ref().child(destination);
+  //const storageRef = admin.storage().ref().child(destination);
   
-  const storageRef = ref(app.storage().bucket()) //ref(storage, destination)//app.storage().bucket();
+  const storageRef = ref(admin.storage().bucket()) //ref(storage, destination)//admin.storage().bucket();
   let imageRef;
-  console.log(app.storage().app.)
+  console.log(admin.storage())
   // await uploadString(storageRef, base64File)
   //   .catch(err => console.log(err))
   // console.log('success')
@@ -1031,6 +1124,7 @@ exports.uploadRestaurantProfilePhoto = async (request, response) => {
   //functions.logger.log("Before File: ", request.file);
 
   bb.on("file", (name, file, info) => {
+    fileObject = file
     const { filename, encoding, mimeType, size } = info;
     functions.logger.log("File>>>>:", size);
 
@@ -1046,7 +1140,18 @@ exports.uploadRestaurantProfilePhoto = async (request, response) => {
       file.on("end", () => {
         writeStream.end();
       });
-      writeStream.on("finish", resolve);
+      writeStream.on("finish", async () => {
+        const metadata = {
+          contentType: imageToBeUploaded.mimetype,
+        }
+        const destination = `Restaurants/${restaurantDocument.slug}/Avatars/${imageToBeUploaded.imageFileName}`;
+        const storageRef = ref(storage, destination);
+        functions.logger.log("path: ", imageToBeUploaded);
+        
+        const snapshot = await uploadBytes(storageRef, fileObject, metadata)
+
+        resolve()
+      });
       writeStream.on("error", reject);
     });
     file.on("error", function (err) {
@@ -1060,11 +1165,9 @@ exports.uploadRestaurantProfilePhoto = async (request, response) => {
   });
   bb.on("finish", async () => {
     await Promise.all(fileWrites);
-
-    const bucket = app.storage().bucket();
-    const destination = `Restaurants/${restaurantDocument.slug}/Avatars/${imageToBeUploaded.imageFileName}`;
-    functions.logger.log("path: ", imageToBeUploaded);
     
+    
+    /*
     await bucket
       .upload(imageToBeUploaded.filePath, {
         resumable: false,
@@ -1080,18 +1183,20 @@ exports.uploadRestaurantProfilePhoto = async (request, response) => {
         console.error(error);
         return response.status(500).json({ error: error.code });
       });
+    */
 
     // // Response
-    const file = await bucket.file(destination);
-    const fileURL = await file.publicUrl();
-    await restaurantDocRef.update({
-      photo: fileURL,
-    });
-    restaurantDocument = (await restaurantDocRef.get()).data();
-//https://us-central1-bocu-b909d.cloudfunctions.net/api/restaurant/image/
-//http://localhost:5001/bocu-b909d/us-central1/api/restaurant/image/
-    functions.logger.log("after send. ", restaurantDocument.get('photo'));
-    console.log(restaurantDocument.get('photo'))
+    //const file = await bucket.file(destination);
+    
+    // const fileURL = snapshot.metadata.fullPath;//await file.publicUrl();
+    // await updateDoc(restaurantDocRef, {
+    //   photo: fileURL,
+    // });
+    restaurantDocument = (await getDoc(restaurantDocRef)).data();
+    //https://us-central1-bocu-b909d.cloudfunctions.net/api/restaurant/image/
+    //http://localhost:5001/bocu-b909d/us-central1/api/restaurant/image/
+    //functions.logger.log("after send. ", restaurantDocument.get('photo'));
+    console.log(restaurantDocument)
     response.json(restaurantDocument);
   });
 
@@ -1108,7 +1213,7 @@ exports.uploadRestaurantProfilePhoto64 = async (request, response) => {
   const defaultMimeType = '';
 
   // Get restaurant document
-  const restaurantDocRef = await db.doc(
+  const restaurantDocRef = await doc(db, 
     `/Restaurants/${request.user.restaurantId}`
   );
 
@@ -1116,7 +1221,7 @@ exports.uploadRestaurantProfilePhoto64 = async (request, response) => {
   let imageFileName;
   const imageExtension = filename.split(".")[filename.split(".").length - 1];
   imageFileName = `${new Date().toISOString()}.${imageExtension}`;
-  const file = app.storage().bucket().file(imageFileName);
+  const file = admin.storage().bucket().file(imageFileName);
 
   // Save media
   const fileOptions = {
@@ -1138,7 +1243,7 @@ exports.uploadRestaurantProfilePhoto64 = async (request, response) => {
   const [metadata] = await file.getMetadata()
 
   // Update restaurant
-  await restaurantDocRef.update({
+  await updateDoc(restaurantDocRef, {
     photo: fileURL,
   });
   
@@ -1201,36 +1306,37 @@ exports.importRestaurants = async (request, response) => {
 
                 //
                 // Create restaurant.
-                db.collection("Restaurants")
-                  .add(newRestaurantItem)
-                  .then((documentRef) => {
-                    // Get new document
-                    documentRef.get().then(async (documentSnapshot) => {
-                      const publicUrl = await generateQR(
-                        documentRef.id,
-                        `Restaurants/${documentSnapshot.data().slug}/qr_${
-                          documentRef.id
-                        }-${new Date().getTime()}.png`
-                      );
+                addDoc(
+                  collection(db, "Restaurants"),
+                  newRestaurantItem
+                ).then((documentRef) => {
+                  // Get new document
+                  getDoc(documentRef).then(async (documentSnapshot) => {
+                    const publicUrl = await generateQR(
+                      documentRef.id,
+                      `Restaurants/${documentSnapshot.data().slug}/qr_${
+                        documentRef.id
+                      }-${new Date().getTime()}.png`
+                    );
 
-                      // register QR URL to database
-                      await documentRef.update({
-                        qrCode: publicUrl,
-                      });
-
-                      // return new document
-                      const updatedDocument = await documentRef.get();
-                      const responseItem = {
-                        id: documentRef.id,
-                        ...updatedDocument.data(),
-                      };
-                      //   response.json(responseItem);
+                    // register QR URL to database
+                    await updateDoc(documentRef, {
+                      qrCode: publicUrl,
                     });
-                  })
-                  .catch((err) => {
-                    console.error(err);
-                    return response.status(500).json({ error: err.code });
+
+                    // return new document
+                    const updatedDocument = await getDoc(documentRef);
+                    const responseItem = {
+                      id: documentRef.id,
+                      ...updatedDocument.data(),
+                    };
+                    //   response.json(responseItem);
                   });
+                })
+                .catch((err) => {
+                  console.error(err);
+                  return response.status(500).json({ error: err.code });
+                });
             }
 
             // increment counter
@@ -1242,66 +1348,67 @@ exports.importRestaurants = async (request, response) => {
     // TODO: validate if user exists.
   
     // TODO: Validate that restaurant exists.
-  
-    
-    db.collection("Restaurants")
-      .add(newRestaurantItem)
-      .then((documentRef) => {
-        // Get new document
-        documentRef.get().then(async (documentSnapshot) => {
-          const stg = app.storage();
-  
-          // generate QR code
-          // var QRCode = require('qrcode')
-          // const qrCode = await QRCode.toDataURL(documentRef.id, {scale: 20, color: {dark: '#E53E3A'}})
-  
-          // // upload QR to bucket
-          // const metadata = {
-          //     public: true,
-          //     resumable: false,
-          //     metadata: { contentType: base64MimeType(qrCode) || '' },
-          //     validation: false
-          // };
-  
-          // const bucket = stg.bucket(config.storageBucket);
-          // const file = bucket.file(`Restaurants/${documentSnapshot.data().slug}/qr_${documentRef.id}-${new Date().getTime()}.png`);
-          // const base64EncodedString = qrCode.replace(/^data:\w+\/\w+;base64,/, '')
-          // const fileBuffer = Buffer.from(base64EncodedString, 'base64')
-          // await file.save(fileBuffer, metadata);
-  
-          const publicUrl = await generateQR(
-            documentRef.id,
-            `Restaurants/${documentSnapshot.data().slug}/qr_${
-              documentRef.id
-            }-${new Date().getTime()}.png`
-          );
-          // register QR URL to database
-          await documentRef.update({
-            qrCode: publicUrl,
-          });
-  
-          // return new document
-          const updatedDocument = await documentRef.get();
-          const responseItem = {
-            id: documentRef.id,
-            ...updatedDocument.data(),
-          };
-          return response.json(responseItem);
+    addDoc(
+      collection(db, "Restaurants"),
+      newRestaurantItem
+    ).then((documentRef) => {
+      // Get new document
+      getDoc(documentRef).then(async (documentSnapshot) => {
+        const stg = admin.storage();
+
+        // generate QR code
+        // var QRCode = require('qrcode')
+        // const qrCode = await QRCode.toDataURL(documentRef.id, {scale: 20, color: {dark: '#E53E3A'}})
+
+        // // upload QR to bucket
+        // const metadata = {
+        //     public: true,
+        //     resumable: false,
+        //     metadata: { contentType: base64MimeType(qrCode) || '' },
+        //     validation: false
+        // };
+
+        // const bucket = stg.bucket(config.storageBucket);
+        // const file = bucket.file(`Restaurants/${documentSnapshot.data().slug}/qr_${documentRef.id}-${new Date().getTime()}.png`);
+        // const base64EncodedString = qrCode.replace(/^data:\w+\/\w+;base64,/, '')
+        // const fileBuffer = Buffer.from(base64EncodedString, 'base64')
+        // await file.save(fileBuffer, metadata);
+
+        const publicUrl = await generateQR(
+          documentRef.id,
+          `Restaurants/${documentSnapshot.data().slug}/qr_${
+            documentRef.id
+          }-${new Date().getTime()}.png`
+        );
+        // register QR URL to database
+        await updateDoc(documentRef, {
+          qrCode: publicUrl,
         });
-      })
-      .catch((err) => {
-        console.error(err);
-        return response.status(500).json({ error: err.code });
+
+        // return new document
+        const updatedDocument = await getDoc(documentRef);
+        const responseItem = {
+          id: documentRef.id,
+          ...updatedDocument.data(),
+        };
+        return response.json(responseItem);
       });
+    })
+    .catch((err) => {
+      console.error(err);
+      return response.status(500).json({ error: err.code });
+    });
   };
 exports.updateAllRestaurants = async (request, response) => {
-  const restaurantsReference = db.collection('Restaurants');
-  const restaurants = await restaurantsReference.get();
+  const restaurantsReference = collection(db, 'Restaurants');
+  const restaurants = await getDocs(query(
+    restaurantsReference
+  ));
 
   if(restaurants.size){
     for(const restaurant of restaurants.docs){
       //const restaurantData = restaurant.data();
-      await restaurant.ref.update({
+      await updateDoc(restaurant.ref, {
         ...request.body
         //schedules: request.body.schedules.map(item => {return {...item, active: true }})
       }).catch((err) => {
@@ -1321,27 +1428,25 @@ exports.updateAllRestaurants = async (request, response) => {
 // Verify restaurant availability
 exports.isRestaurantNameAvailable = (request, response) => {
   // TODO: Validate for case sensitive.
-  let document = db
-    .collection("Restaurants")
-    .where("name", "==", `${request.params.restaurantName}`)
-    .get()
-    .then((data) => {
-      if (data.size) {
-        return response.json({
-          available: false,
-        });
-      } else {
-        return response.json({
-          available: true,
-        });
-      }
-    })
-    .catch((err) => {
-      console.error(err);
-      return response.status(500).json({
-        error: err.code,
+  let document = getDocs(query(
+    collection(db, "Restaurants"),
+    where("name", "==", `${request.params.restaurantName}`)
+  )).then((data) => {
+    if (data.size) {
+      return response.json({
+        available: false,
       });
+    } else {
+      return response.json({
+        available: true,
+      });
+    }
+  }).catch((err) => {
+    console.error(err);
+    return response.status(500).json({
+      error: err.code,
     });
+  });
 };
 
 exports.createQR = async (request, response) => {
@@ -1355,7 +1460,7 @@ exports.createQR = async (request, response) => {
 };
 
 const generateQR = async (restaurantId, path) => {
-  const stg = app.storage();
+  const stg = admin.storage();
 
   // generate QR code
   var QRCode = require("qrcode");

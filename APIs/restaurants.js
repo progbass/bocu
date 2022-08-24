@@ -1,22 +1,25 @@
-const { db, app, storage } = require('../utils/admin');
+const { db, app, storage, auth } = require('../utils/admin');
+const { MAX_RESTAURANTS_PER_USER } = require('../utils/app-config');
 const { ref: storageRef, getDownloadURL } = require('firebase/storage');
 const { 
-    deleteDoc,
+    doc, 
     addDoc,
+    getDoc, 
+    getDocs, 
+    updateDoc, 
+    deleteDoc,
     collection, 
     limit, 
     orderBy, 
-    getDocs, 
-    getDoc, 
-    doc, 
     query, 
     where, 
-    updateDoc 
+    Timestamp
 } = require('firebase/firestore'); 
 const { 
     hasMissingRequirements, 
     generateQR
 } = require('../utils/restaurant-utils');
+const { isDealValid } = require('../utils/deals-utils');
 const getCurrentUser = require("../utils/getCurrentUser");
 const slugify = require('slugify')
 const dayjs = require("dayjs");
@@ -38,8 +41,22 @@ const MAX_SEARCH_RESULTS_HITS = 100;
 // GET SINGLE RESTAURANT
 exports.getRestaurant = async (request, response) => {
     try {
+        const currentUser = await getCurrentUser(request, response);
+        let restaurantId = request.params.restaurantId;
+
+        // Validate if restaurant id is present
+        if(!restaurantId){
+            restaurantId = currentUser?.restaurantId;
+            if(!restaurantId){
+                return response.status(400).json({
+                    error: 'Restaurant not found.'
+                });
+            }
+        }
+
+        // Try to get restaurant
         let restaurant = await getDoc(
-            doc(db, 'Restaurants', `${request.params.restaurantId}`)
+            doc(db, 'Restaurants', `${restaurantId}`)
         );
         if(!restaurant.exists()){
             return response.status(404).json({
@@ -49,11 +66,10 @@ exports.getRestaurant = async (request, response) => {
         
         // Get user 'favorite' if logged in
         let isFavorite = false;
-        const loggedUser = await getCurrentUser(request, response);        
-        if(loggedUser){
+        if(currentUser){
             const favoritesCollection = await getDocs(query(
                 collection(db, 'UserFavorites'),
-                where('userId', '==', loggedUser.uid)
+                where('userId', '==', currentUser.uid)
             )).catch((err) => {
                 console.error(err);
                 return;
@@ -88,6 +104,8 @@ exports.getRestaurant = async (request, response) => {
             if(isDealValid(doc.data())){
                 deals.push({
                     ...doc.data(),
+                    startsAt: dayjs.unix(doc.data().startsAt.seconds),
+                    expiresAt: dayjs.unix(doc.data().expiresAt.seconds),
                     id: doc.id
                 })
             }
@@ -181,11 +199,11 @@ exports.getRestaurants = async (request, response) => {
 
             // Get user 'favorite' if logged in
             let isFavorite = false;
-            const loggedUser = await getCurrentUser(request, response);
-            if(loggedUser){
+            const currentUser = await getCurrentUser(request, response);
+            if(currentUser){
                 const favoritesCollection = await getDocs(query(
                     collection(db, `UserFavorites`),
-                    where('userId', '==', loggedUser.uid)
+                    where('userId', '==', currentUser.uid)
                 )).catch((err) => {
                     console.error(err);
                     return;
@@ -290,7 +308,7 @@ exports.editRestaurant = async (request, response) => {
     let restaurant = await getDoc(restaurantReference);
   
     // Validate that restaurant exists.
-    if(!restaurant.exists){
+    if(!restaurant.exists()){
         response.status(404).json({message: 'User restaurant not found.'});
     }
     
@@ -364,13 +382,13 @@ exports.createRestaurant = async (request, response) => {
             restaurantCollection,
             where('userId', '==', request.user.uid)
         ));
-        if(currentUserRestaurant.size > 0){
+        console.log('asdasd ', existingRestaurant.size, auth.currentUser)
+        if(currentUserRestaurant.size >= MAX_RESTAURANTS_PER_USER){
             return response.status(403).json({ error: 'User already have a restaurant.' });
         }
     
         // Create restaurant.
         const newRestaurantItem = {
-            name: request.body.name,
             categories: [],
             qrCode: '',
             photo: '',
@@ -381,8 +399,9 @@ exports.createRestaurant = async (request, response) => {
             phone: '',
             description: '',
             instagram: '',
-        
+
             ...request.body,
+            name: request.body.name,
             slug: slugify(request.body.name?.toLowerCase()),
             active: false,
             isApproved: false,
@@ -390,6 +409,57 @@ exports.createRestaurant = async (request, response) => {
             email: request.user.email,
             userId: request.user.uid,
             createdAt: dayjs().toDate(),
+            schedules: [
+                {
+                    "dayName": "Lu",
+                    "daySlug": "monday",
+                    "closesAt": "22:00",
+                    "opensAt": "10:00",
+                    "active": true
+                },
+                {
+                    "dayName": "Ma",
+                    "daySlug": "tuesday",
+                    "closesAt": "22:00",
+                    "opensAt": "10:00",
+                    "active": true
+                },
+                {
+                    "dayName": "Mi",
+                    "daySlug": "wednesday",
+                    "closesAt": "22:00",
+                    "opensAt": "10:00",
+                    "active": true
+                },
+                {
+                    "dayName": "Ju",
+                    "daySlug": "thursday",
+                    "closesAt": "22:00",
+                    "opensAt": "10:00",
+                    "active": true
+                },
+                {
+                    "dayName": "Vi",
+                    "daySlug": "friday",
+                    "closesAt": "22:00",
+                    "opensAt": "10:00",
+                    "active": true
+                },
+                {
+                    "dayName": "Sa",
+                    "daySlug": "saturday",
+                    "closesAt": "20:00",
+                    "opensAt": "10:00",
+                    "active": true
+                },
+                {
+                    "dayName": "Do",
+                    "daySlug": "sunday",
+                    "closesAt": "20:00",
+                    "opensAt": "10:00",
+                    "active": true
+                },
+            ]
         };
         
         const documentRef = await addDoc(
@@ -441,7 +511,6 @@ exports.createRestaurant = async (request, response) => {
 };
 
 
-
 exports.getRestaurantDeal = async (request, response) => {
     // Validate that restaurantId exists.
     if(!request.params.restaurantId){
@@ -450,8 +519,8 @@ exports.getRestaurantDeal = async (request, response) => {
         })
     }
     
-    let document = db.collection('Deals').doc(`${request.params.dealId}`);
-    document.get()
+    let documentReference = doc(db, 'Deals', request.params.dealId);
+    await getDoc(documentReference)
         .then(doc => {
             response.json({
                 ...doc.data(),
@@ -476,14 +545,16 @@ exports.getRestaurantDeals = async (request, response) => {
     }
     
     // Buidl query
-    let collectionRef = db.collection('Deals')
-        .where('restaurantId', '==', request.params.restaurantId)
-        .where('expiresAt', '>=', app.firestore.Timestamp.fromDate(dayjs().add(DEALS_EXPIRY_OFFSET_MINUTES, 'minutes').toDate()))
-        .where('active', '==', true)
-        .limit(RESTAURANT_DEALS_COUNT_MAX);
+    let collectionQuery = query(
+        collection(db, 'Deals'),
+        where('restaurantId', '==', request.params.restaurantId),
+        where('expiresAt', '>=', Timestamp.fromDate(dayjs().add(DEALS_EXPIRY_OFFSET_MINUTES, 'minutes').toDate())),
+        where('active', '==', true),
+        limit(RESTAURANT_DEALS_COUNT_MAX)
+    );
         
     // Get deals collection
-    let collection = await collectionRef.get()
+    let dealsCollection = await getDocs(collectionQuery)
         .catch((err) => {
             console.error(err);
             return response.status(500).json({
@@ -492,9 +563,9 @@ exports.getRestaurantDeals = async (request, response) => {
         });
 
     // Response
-    if (collection.size > 0) {
+    if (dealsCollection.size > 0) {
         let restaurants = [];
-        collection.forEach((doc) => {
+        dealsCollection.forEach((doc) => {
             restaurants.push({
                 ...doc.data(),
                 id: doc.id,
@@ -520,19 +591,19 @@ exports.getRestaurantGallery = async (request, response) => {
     }
 
     // Get Photos collection
-    const collection = await db.collection(`RestaurantPhotos`)
-        .where('restaurantId', '==', request.params.restaurantId)
-        .get()
-        .catch((err) => {
-            return response.status(500).json({
-                error: err.code
-            });
-        });;
+    const photosCollection = await getDocs(query(
+        collection(db, `RestaurantPhotos`),
+        where('restaurantId', '==', request.params.restaurantId)
+    )).catch((err) => {
+        return response.status(500).json({
+            error: err.code
+        });
+    });
 
     // Response
-    if (collection.size > 0) {
+    if (photosCollection.size > 0) {
         let photos = [];
-        collection.forEach((doc) => {
+        photosCollection.forEach((doc) => {
             photos.push({
                 ...doc.data(),
                 id: doc.id
@@ -550,10 +621,10 @@ exports.getRestaurantGallery = async (request, response) => {
 // Serch (with Algolia)
 exports.searchRestaurants = async (request, response) => {
     const algoliaIndex = algoliaClient.initIndex(request.params.indexName);
-    const {query = '', ...params} = request.body;
+    const {query:searchQuery = '', ...params} = request.body;
     
     // Query Algolia
-    const queryResponse = await algoliaIndex.search(query, {
+    const queryResponse = await algoliaIndex.search(searchQuery, {
         ...params,
         //attributesToRetrieve: ['firstname', 'lastname'],
         hitsPerPage: MAX_SEARCH_RESULTS_HITS,
@@ -569,19 +640,19 @@ exports.searchRestaurants = async (request, response) => {
         let results = [];
 
         // Get current user state
-        const loggedUser = await getCurrentUser(request, response)
+        const currentUser = await getCurrentUser(request, response)
             .catch(err => {
                 console.log(err)
             });
         let favoritesCollection = undefined;
-        if(loggedUser){
-            favoritesCollection = await db.collection(`UserFavorites`)
-                .where('userId', '==', loggedUser.uid)
-                .get()
-                .catch((err) => {
-                    console.error(err);
-                    return;
-                });
+        if(currentUser){
+            favoritesCollection = await getDocs(query(
+                collection(db, `UserFavorites`),
+                where('userId', '==', currentUser.uid)
+            )).catch((err) => {
+                console.error(err);
+                return;
+            });
         }
 
         // Configure each item
@@ -616,29 +687,3 @@ exports.searchRestaurants = async (request, response) => {
         error: 'No restaurants were found.'
     });
 }
-
-
-const isDealValid = (deal) => {
-    // Config
-    let isValid = false;
-
-    // Is active
-    if(!deal.active){
-        return false;
-    }
-
-    // Number of uses
-    if(!deal.useCount >= deal.useMax){
-        return false;
-    }
-
-    // Check expry date
-    const now = dayjs();
-    if(now > dayjs.unix(deal.expiresAt.seconds).utcOffset(UTC_OFFSET)){
-        return false
-    }
-
-    //
-    return true;
-}
-
