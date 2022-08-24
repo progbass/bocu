@@ -1,7 +1,10 @@
 require("dotenv").config();
 
+const { credential } = require('firebase-admin');
+const serviceAccount = require('../service-account-file.json')
 const { initializeApp: initializeAdmin, applicationDefault } = require('firebase-admin/app');
 const { initializeApp } = require("firebase/app");
+const { getFirestore: getAdminFirestore } = require("firebase-admin/firestore");
 const { getFirestore } = require('firebase/firestore');
 const { getStorage } = require('firebase/storage');
 const { getAuth: getAdminAuth } = require("firebase-admin/auth");
@@ -10,7 +13,7 @@ const config = require('./config');
 
 // Init admin app. To perform specific operations that require priviliged permissions
 const admin = initializeAdmin({
-    credential: applicationDefault(),
+    credential: credential.cert(serviceAccount),
     apiKey: config.apiKey,
     authDomain: config.authDomain,
     projectId: config.projectId,
@@ -19,7 +22,7 @@ const admin = initializeAdmin({
     appId: config.appId,
     measurementId: config.measurementId,
     databaseURL: config.databaseURL
-})
+}, 'server')
 
 // Standard app (run as 'client-side' to avoid using privileged permissions of the 'admin' SDK)
 const app = initializeApp({
@@ -31,13 +34,15 @@ const app = initializeApp({
     appId: config.appId,
     measurementId: config.measurementId,
     databaseURL: config.databaseURL
-});
+}, 'client');
 
 // Get SDKs references
 const auth = getAuth(app);
+auth.languageCode = 'es';
 const db = getFirestore(app);
 const storage = getStorage(app);
 const adminAuth = getAdminAuth(admin);
+const adminDb = getAdminFirestore(admin);
 
 // Export objects
-module.exports = { app, db, auth, storage, admin, adminAuth };
+module.exports = { app, db, auth, storage, admin, adminDb, adminAuth };

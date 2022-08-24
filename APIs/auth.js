@@ -1,63 +1,98 @@
 const { 
     signInWithEmailAndPassword, 
-    createUserWithEmailAndPassword,
-    signOut
+    signOut,
+    setPersistence,
+    sendPasswordResetEmail,
+    sendEmailVerification
 } = require("firebase/auth");
-const config = require("../utils/config")
+const { 
+    getDocs, 
+    collection, 
+    query,
+    where
+  } = require('firebase/firestore' );
 const { validateLoginData, validateSignUpData } = require('../utils/validators');
-const { auth, adminAuth } = require('../utils/admin');
-const { connectStorageEmulator } = require("firebase/storage");
+const { auth, adminAuth, db } = require('../utils/admin');
 
 exports.loginUser = async (request, response) => {
     //
-    let user = {
+    let userCredentials = {
         email: request.body.email,
 		password: request.body.password
 	}
-	const { valid, errors } = validateLoginData(user);
+	const { valid, errors } = validateLoginData(userCredentials);
 	if (!valid) return response.status(400).json(errors);
 
     // Sign in with email/password provider
-    const userData = await signInWithEmailAndPassword(auth, user.email, user.password)
+    await auth.setPersistence('SESSION');
+    const userAuth = await signInWithEmailAndPassword(auth, userCredentials.email, userCredentials.password)
         .catch((error) => {
             console.error(error);
             return response.status(403).json({ general: 'wrong credentials, please try again' });
         })
-    user = {
-        ...user,
-        ...userData.user
-    }
-    // const test = await adminAuth.getUserByEmail(user.email);
-    // console.log(test.customClaims)
-    // await adminAuth.setCustomUserClaims(user.uid, {
+    //
+    // const test = await adminAuth.getUserByEmail('hello@world.com');
+    // console.log(test);
+    // await adminAuth.setCustomUserClaims(undefined, {
     //     admin: true
     // })
 
-    const token = await userData.user.getIdToken(true);
-    return response.json({ ...user, token });
+    const customUserToken = await adminAuth.createCustomToken(userAuth.user.uid);
+    const { stsTokenManager, auth: authObj, reloadListener, reloadUserInfo, proactiveRefresh, ...userData } = userAuth.user;
+    
+    // Get user's restaurant
+	let userRestaurant = await getRestaurants(userData.uid);
+	userRestaurant = userRestaurant.length ? userRestaurant[0].id : null;
+    
+    return response.json({ 
+        ...userData, 
+        accessToken: customUserToken,
+        token: customUserToken,
+        restaurantId: userRestaurant
+    });
 };
 
 exports.logoutUser = async (request, response) => {
     await signOut(auth)
         .catch((error) => {
             console.error(error);
-            return response.status(403).json({ general: 'wrong credentials, please try again' });
+            return response.status(403).json({ general: 'Error closing session, please try again' });
         });
 
     //
     return response.json({message: 'success'});
 };
 
-exports.createUser = (request, response) => {
-	createUserWithEmailAndPassword(auth, request.body.email, request.body.password)
-		.then((userCredential) => {
-			// Signed in 
-			const user = userCredential.user;
-			return response.json({ ...user });
-		})
-		.catch((error) => {
-			const code = error.code;
-			const message = error.message;
-			return response.status(409).json({ code, message, type: 'error' });
-		});
+exports.resetPassword = async (request, response) => {
+   await  sendPasswordResetEmail(auth, request.params.email)
+    .then(() => {
+        // Password reset email sent!
+        return response.json({message: 'success'});
+    }).catch((error) => {
+        console.error(error);
+        return response.status(403).json({ general: 'Error sending password rest email.' });
+    });
+};
+
+exports.verificateUserEmail = async (request, response) => {
+    const user = await adminAuth.updateUser(request.params.userId, {
+        emailVerified: true
+    }).catch((error) => {
+        console.error(error);
+        return response.status(403).json({ general: 'Error verifying user.' });
+    });
+    
+    //
+    return response.json({message: 'success'});
+ };
+
+const getRestaurants = async userId => {
+	const userRestaurant = await getDocs(query(
+		collection(db, 'Restaurants'),
+		where("userId", "==", userId)
+	)).catch(err => {
+		console.log(err)
+		return response.status(500).json(err);
+	});
+	return userRestaurant.size ? userRestaurant.docs : [];
 }
