@@ -1,17 +1,19 @@
-const functions = require("firebase-functions");
-const { generateQrCode } = require("../utils/qr-code");
-const { db, app, auth } = require('../utils/admin');
-const config = require('../utils/config');
-const slugify = require('slugify')
-const busboy = require('busboy');
-const queryString = require('query-string');
-const path = require('path');
-const os = require('os');
-const fs = require('fs');
+const { 
+    query, 
+    doc, 
+    addDoc,
+    getDoc, 
+    getDocs, 
+    deleteDoc,
+    collection, 
+    where, 
+    Timestamp, 
+} = require('firebase/firestore');
+const { db } = require('../utils/admin');
 const dayjs = require('dayjs');
 var utc = require('dayjs/plugin/utc');
 var timezone = require('dayjs/plugin/timezone');
-const { get } = require("http");
+const { isDealValid } = require('../utils/deals-utils');
 
 // Dates configuration.
 dayjs.extend(utc);
@@ -21,20 +23,22 @@ const UTC_OFFSET = -5;
 // Add favorite
 exports.addFavorite = async (request, response) => {
     // Date settings
-    const createdAt = dayjs.utc().utcOffset(UTC_OFFSET);
+    const createdAt = dayjs().unix();
 
     // New favorite.
     let newFavorite = {
         userId: request.user.uid,
         restaurantId: request.params.restaurantId,
-        createdAt: app.firestore.Timestamp.fromDate(createdAt.toDate()),
+        createdAt: new Timestamp(createdAt),
     }
 
     // Look for existing records
-    const favoritesCol =  db.collection(`UserFavorites`)
-        .where('userId', '==', request.user.uid)
-        .where('restaurantId', '==', request.params.restaurantId)
-    const favoritesDocs = await favoritesCol.get()
+    const favoritesQuery =  query(
+        collection(db, `UserFavorites`),
+        where('userId', '==', request.user.uid),
+        where('restaurantId', '==', request.params.restaurantId)
+    )
+    const favoritesDocs = await getDocs(favoritesQuery)
         .catch((err) => {
             console.error(err);
             return response.status(500).json({ error: err.code });
@@ -46,23 +50,22 @@ exports.addFavorite = async (request, response) => {
         return response.json({
             ...favorite.data(),
             id: favorite.id,
-            createdAt: dayjs.unix(favorite.data().createdAt.seconds).utcOffset(UTC_OFFSET)
+            createdAt: dayjs.unix(favorite.data().createdAt.seconds)
         });
     }
 
     // Add Favorite
-    db
-    .collection('UserFavorites')
-    .add(newFavorite)
-    .then(async (documentRef) => {
-        const doc = await documentRef.get()
+    addDoc(
+        collection(db, 'UserFavorites'),
+        newFavorite
+    ).then(async (documentRef) => {
+        const doc = await getDoc(documentRef);
         return response.json({
             ...newFavorite,
             id: doc.id,
-            createdAt: dayjs.unix(doc.data().createdAt.seconds).utcOffset(UTC_OFFSET)
+            createdAt: dayjs.unix(doc.data().createdAt.seconds)
         }); 
-    })
-    .catch((err) => {
+    }).catch((err) => {
         console.error(err);
         return response.status(500).json({ error: err.code });
     });
@@ -70,11 +73,13 @@ exports.addFavorite = async (request, response) => {
 // Get Favorites List
 exports.getFavorites = async (request, response) => {
     // Build query
-    let collectionReference = db.collection(`UserFavorites`)
-        .where('userId', '==', request.user.uid)
+    let favoritesQuery = query(
+        collection(db, `UserFavorites`),
+        where('userId', '==', request.user.uid)
+    )
 
     // Get collection
-    const collection = await collectionReference.get()
+    const FavsCollection = await getDocs(favoritesQuery)
         .catch((err) => {
             return response.status(500).json({
                 error: err.code
@@ -82,22 +87,22 @@ exports.getFavorites = async (request, response) => {
         });;
 
     // Response
-    if (collection.size > 0) {
+    if (FavsCollection.size > 0) {
         let favorites = [];
-        for (const fav of collection.docs) {
+        for (const fav of FavsCollection.docs) {
             // Get Restaurant
-            const restaurantRef = db.doc(`Restaurants/${fav.get('restaurantId')}`)
-            const restaurant =  await restaurantRef.get()
+            const restaurantRef = doc(db, `Restaurants`, fav.get('restaurantId'))
+            const restaurant =  await getDoc(restaurantRef)
                 .catch(err => {});
 
             // Get collection
-            const raitingRef = await db.collection(`RestaurantRatings`)
-                .where('restaurantId', '==', restaurant.id)
-                .get()
-                .catch((err) => {
-                    console.error(err);
-                    return;
-                });
+            const raitingRef = await getDocs(query(
+                collection(db, `RestaurantRatings`),
+                where('restaurantId', '==', restaurant.id)
+            )).catch((err) => {
+                console.error(err);
+                return;
+            });
 
             // Get raitings average
             let rating = 0;
@@ -142,13 +147,15 @@ exports.getFavorites = async (request, response) => {
 
             // Get restaurant deals
             const deals = [];
-            const dealsCollection = await db.collection(`Deals`)
-                .where('restaurantId', '==', restaurant.id)
-                .get()
-                .catch((err) => {
-                    console.error(err);
-                    return;
-                });
+            const dealsCollection = await getDocs(query(
+                collection(db, `Deals`),
+                where('restaurantId', '==', restaurant.id)
+            )).catch((err) => {
+                console.error(err);
+                return;
+            });
+
+            //
             dealsCollection.forEach(val => {
                 if(isDealValid(val.data())){
                     deals.push({
@@ -178,10 +185,12 @@ exports.getFavorites = async (request, response) => {
 // Remove favorite
 exports.removeFavorite = async (request, response) => {
     // Look for existing records
-    const favoritesCol =  db.collection(`UserFavorites`)
-        .where('userId', '==', request.user.uid)
-        .where('restaurantId', '==', request.params.restaurantId)
-    const favoritesDocs = await favoritesCol.get()
+    const favoritesQuery =  query(
+        collection(db, `UserFavorites`),
+        where('userId', '==', request.user.uid),
+        where('restaurantId', '==', request.params.restaurantId)
+    );
+    const favoritesDocs = await getDocs(favoritesQuery)
         .catch((err) => {
             console.error(err);
             return response.status(500).json({ error: err.code });
@@ -189,7 +198,7 @@ exports.removeFavorite = async (request, response) => {
     
     // Remove documents from collection
     favoritesDocs.forEach(async docRef => {
-        await docRef.ref.delete().catch((err) => {
+        await deleteDoc(docRef.ref).catch((err) => {
             return response.status(500).json({
                 error: err.code
             });
@@ -200,29 +209,4 @@ exports.removeFavorite = async (request, response) => {
     return response.json({
         message: 'Favorite was removed successfully.'
     });
-}
-
-//
-const isDealValid = (deal) => {
-    // Config
-    let isValid = false;
-
-    // Is active
-    if(!deal.active){
-        return false;
-    }
-
-    // Number of uses
-    if(!deal.useCount >= deal.useMax){
-        return false;
-    }
-
-    // Check expry date
-    const now = dayjs();
-    if(now > dayjs.unix(deal.expiresAt.seconds).utcOffset(UTC_OFFSET)){
-        return false
-    }
-
-    //
-    return true;
 }
