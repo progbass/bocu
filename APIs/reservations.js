@@ -1,4 +1,18 @@
+const { 
+    doc,
+    addDoc, 
+    getDoc, 
+    getDocs, 
+    query, 
+    collection, 
+    updateDoc,
+    Timestamp,
+    where,
+    limit,
+    orderBy
+} = require('firebase/firestore');
 const { db, app } = require('../utils/admin');
+const { RESERVATION_STATUS } = require('../utils/reservations-utils');
 const dayjs = require('dayjs');
 var utc = require('dayjs/plugin/utc');
 var timezone = require('dayjs/plugin/timezone');
@@ -10,17 +24,6 @@ dayjs.tz.setDefault("America/Mexico_City")
 
 // Config.
 const UTC_OFFSET = -5;
-const RESERVATION_STATUS = {
-    AWAITING_CUSTOMER: 1,
-    USER_CANCELED: 2,
-    TOLERANCE_TIME: 3,
-    RESERVATION_EXPIRED: 4, 
-    RESERVATION_FULFILLED: 5,
-    RESTAURANT_CANCELED: 6,
-    OTHER: 7,
-    DEAL_EXPIRED: 8,
-    DEAL_CANCELED: 9
-  }
 
 // Methods
 exports.createReservation = async (request, response) => {
@@ -31,25 +34,23 @@ exports.createReservation = async (request, response) => {
             status: RESERVATION_STATUS.AWAITING_CUSTOMER,
             checkIn: null,
             count: request.body.count,
-            customerId: request.body.customerId,
+            customerId: request.user.uid,
             dealId: request.body.dealId,
             restaurantId: request.body.restaurantId,
-            reservationDate: app.firestore.Timestamp.fromDate(dayjs.utc(request.body.reservationDate).utcOffset(UTC_OFFSET).toDate()),
-            createdAt: app.firestore.Timestamp.fromDate(dayjs.utc().utcOffset(10).toDate()),
+            reservationDate: Timestamp.fromDate(dayjs.utc(request.body.reservationDate).utcOffset(UTC_OFFSET).toDate()),
+            createdAt: Timestamp.fromDate(dayjs.utc().utcOffset(10).toDate()),
             cancelledAt: null,
         };
 
-        console.log(newReservation.createdAt)
-
         // Get collection
-        const reservationsCollection = db.collection('Reservations');
+        const reservationsCollection = collection(db, 'Reservations');
 
         // ToDo: Invalidar el resto de las reservaciones del usuario?
 
         // Get related deal
-        const dealRef = db.doc(`Deals/${request.body.dealId}`);
-        let deal = await dealRef.get();
-        if(!deal.exists){
+        const dealRef = doc(db, `Deals/`, request.body.dealId);
+        let deal = await getDoc(dealRef);
+        if(!deal.exists()){
             return response.status(400).json({
                 error: 'Deal not found.'
             }) 
@@ -61,23 +62,24 @@ exports.createReservation = async (request, response) => {
         }
         // Validate that there are still 'use counts' avaliable for the deal.
         if(deal.get('useCount') >= deal.get('useMax')){
-            await dealRef.update({active: false});
+            await updateDoc(dealRef, {active: false});
 
             return response.status(400).json({
                 error: 'Number of reservations exceeded.'
             }) 
         }
         // Update deal use count
-        await dealRef.update({useCount: deal.get('useCount')+1});
-        deal = await dealRef.get();
+        await updateDoc(dealRef, {useCount: deal.get('useCount')+1});
+        deal = await getDoc(dealRef);
         // Update
         if(deal.get('useCount') >= deal.get('useMax')){
-            await dealRef.update({active: false});
+            await updateDoc(dealRef, {active: false});
         }
 
 
         // Add new reservation
-        const reservation = await (await reservationsCollection.add(newReservation)).get();
+        const reservationRef = await addDoc(reservationsCollection, newReservation)
+        const reservation = await getDoc(reservationRef);
         
         // Send confirmation to user
         return response.status(200).json({ 
@@ -87,32 +89,33 @@ exports.createReservation = async (request, response) => {
             reservationDate: dayjs.unix(reservation.get('reservationDate').seconds)
         })
     } catch (err){
+        console.log(err)
         return response.status(500).json({ error: err })
     }
 }
 exports.cancelReservation = async (request, response) => {
     try {
         // Get reservation
-        const reservationRef = db.doc(`Reservations/${request.params.reservationId}`);
-        await reservationRef.update({
+        const reservationRef = doc(db, `Reservations`, request.params.reservationId);
+        await updateDoc(reservationRef, {
             status: RESERVATION_STATUS.USER_CANCELED, 
             active: false,
-            cancelledAt: app.firestore.Timestamp.fromDate(new Date())
+            cancelledAt: Timestamp.fromDate(new Date())
         });
-        const reservation = await reservationRef.get();
+        const reservation = await getDoc(reservationRef);
 
-        if(!reservation.exists){
+        if(!reservation.exists()){
             return response.status(400).json({
                 error: 'Reservation not found.'
             }) 
         }
 
         // Update deal use count
-        const dealRef = db.doc(`Deals/${reservation.get('dealId')}`);
-        const deal = await dealRef.get();
+        const dealRef = doc(db, `Deals`, reservation.get('dealId'));
+        const deal = await getDoc(dealRef);
         let useCount = deal.get('useCount')-1;
         useCount = useCount > 0 ? useCount : 0;
-        await dealRef.update({useCount})
+        await updateDoc(dealRef, {useCount})
 
         // Send confirmation to user
         return response.status(200).json({ ...reservation.data(), id: reservation.id })
@@ -122,19 +125,18 @@ exports.cancelReservation = async (request, response) => {
 }
 exports.getReservation = async (request, response) => {
     try {
-        let document = await db.collection('Reservations')
-            .doc(`${request.params.reservationId}`)
-            .get()
-            .catch((err) => {
-                console.error(err);
-                return response.status(500).json({
-                    error: err.code
-                });
+        let document = await getDoc(
+            doc(db, 'Reservations', request.params.reservationId)
+        ).catch((err) => {
+            console.error(err);
+            return response.status(500).json({
+                error: err.code
             });
+        });
 
         // Get User
-        const customerSnap = await auth.getUser(document.data().customerId);
-        const customer = customerSnap.toJSON();
+        //const customerSnap = await adminAuth.getUser(document.data().customerId);
+        const customer = request.user; //customerSnap.toJSON();
         
         // Return reservation document
         return response.status(200).json({
