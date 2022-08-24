@@ -1,16 +1,9 @@
-const { db, app, auth, storage } = require("../utils/admin");
+const { db } = require("../utils/admin");
 const { 
-    deleteDoc,
     addDoc,
     collection, 
-    limit, 
-    orderBy, 
     getDocs, 
-    getDoc, 
-    doc, 
     query, 
-    where, 
-    updateDoc 
 } = require('firebase/firestore'); 
 const slugify = require("slugify");
 const dayjs = require("dayjs");
