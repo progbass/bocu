@@ -1,14 +1,18 @@
 module.exports = {
-  root: true,
   env: {
-    es6: true,
-    node: true,
+    browser: true,
+    commonjs: true,
+    es2021: true,
   },
-  extends: [
-    "eslint:recommended",
-    "google",
-  ],
-  rules: {
-    quotes: ["error", "double"],
+  extends: "eslint:recommended",
+  overrides: [],
+  parserOptions: {
+    ecmaVersion: "latest",
+  },
+  rules: {},
+  globals: {
+    describe: "readonly",
+    it: "readonly",
+    process: "readonly",
   },
 };
