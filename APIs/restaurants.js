@@ -1,5 +1,5 @@
-const { db, app, storage, auth } = require('../utils/admin');
-const { MAX_RESTAURANTS_PER_USER } = require('../utils/app-config');
+const { db, storage } = require('../utils/admin');
+const { MAX_RESTAURANTS_PER_USER, SEARCH_CONFIG, LISTING_CONFIG } = require('../utils/app-config');
 const { ref: storageRef, getDownloadURL } = require('firebase/storage');
 const { 
     doc, 
@@ -19,7 +19,7 @@ const {
     hasMissingRequirements, 
     generateQR
 } = require('../utils/restaurant-utils');
-const { isDealValid } = require('../utils/deals-utils');
+const { isDealActive, isDealValid } = require('../utils/deals-utils');
 const getCurrentUser = require("../utils/getCurrentUser");
 const slugify = require('slugify')
 const dayjs = require("dayjs");
@@ -31,17 +31,118 @@ const algoliaClient = algoliasearch(
     process.env.ALGOLIA_ADMIN_API_KEY
 );
 
-// Config
-const UTC_OFFSET = -5;
-const RESTAURANT_MAX_COUNT = 10;
-const RESTAURANT_DEALS_COUNT_MAX = 10;
-const DEALS_EXPIRY_OFFSET_MINUTES = 10;
-const MAX_SEARCH_RESULTS_HITS = 100;
+exports.testFunction = async (request, response) => {
+    
+
+    
+    return response.status(401);
+    // Response
+    if (restaurantsCollection.size > 0) {
+        // update reservation status
+        let docs = restaurantsCollection.docs;
+        let restaurants = [];
+        for (let doc of docs) {
+
+            // Get user 'favorite' if logged in
+            let isFavorite = false;
+            const currentUser = await getCurrentUser(request, response).catch(() => {
+                    return null
+                });
+            if(currentUser){
+                const favoritesCollection = await getDocs(query(
+                    collection(db, `UserFavorites`),
+                    where('userId', '==', currentUser.uid)
+                )).catch((err) => {
+                    console.error(err);
+                    return;
+                });
+                // Is 'favorite' of the user
+                favoritesCollection.forEach(favorite => {
+                    if(favorite.data().restaurantId == doc.id){
+                        isFavorite;
+                    }
+                })
+            }
+
+            // Get collection
+            const raitingRef = await getDocs(query(
+                collection(db, `RestaurantRatings`),
+                where('restaurantId', '==', doc.id)
+            )).catch((err) => {
+                console.error(err);
+                return;
+            });
+
+            // Get raitings average
+            let rating = 0;
+            const ratingCount = raitingRef.size;
+            if(ratingCount){ 
+                let counterGroups = {
+                    'one': 0,
+                    'two': 0,
+                    'three': 0,
+                    'four': 0,
+                    'five': 0,
+                }
+                raitingRef.forEach(doc => {
+                    switch(doc.data().rate){
+                        case 1:
+                            counterGroups.one += 1;
+                            break;
+                        case 2:
+                            counterGroups.two += 1;
+                            break;
+                        case 3:
+                            counterGroups.three += 1;
+                            break;
+                        case 4:
+                            counterGroups.four += 1;
+                            break;
+                        case 5:
+                            counterGroups.five += 1;
+                            break;
+                    }
+                })
+                rating = (
+                    1 * counterGroups.one
+                    + 2 * counterGroups.two
+                    + 3 * counterGroups.three
+                    + 4 * counterGroups.four
+                    +5 * counterGroups.five
+                ) / (5 * ratingCount);
+                rating *= 5;
+                rating = `${rating} (${ratingCount})`;
+            }
+
+            // Get restaurant deals
+            const deals = await getRestaurantDeals(doc.id);
+
+            // Return restaurant object
+            restaurants.push({
+                ...doc.data(),
+                id: doc.id,
+                isFavorite,
+                rating,
+                deals,
+            });
+        }
+
+        //
+        return response.json(restaurants);
+    } else {
+        return response.status(204).json({
+            error: 'No restaurants were found.'
+        });
+    }
+}
 
 // GET SINGLE RESTAURANT
 exports.getRestaurant = async (request, response) => {
     try {
-        const currentUser = await getCurrentUser(request, response);
+        const currentUser =  await getCurrentUser(request, response)
+            .catch(() => {
+                return null
+            });
         let restaurantId = request.params.restaurantId;
 
         // Validate if restaurant id is present
@@ -64,7 +165,7 @@ exports.getRestaurant = async (request, response) => {
             });
         }
         
-        // Get user 'favorite' if logged in
+        // Get user's 'favorites' if logged in
         let isFavorite = false;
         if(currentUser){
             const favoritesCollection = await getDocs(query(
@@ -94,18 +195,20 @@ exports.getRestaurant = async (request, response) => {
         // Get restaurant deals
         const dealsCollection = await getDocs(query(
             collection(db, `Deals`),
-            where('restaurantId', '==', restaurant.id)
+            where('restaurantId', '==', restaurant.id),
+            where('active', '==', true)
         )).catch((err) => {
             console.error(err);
             return;
         });
         const deals = [];
         dealsCollection.forEach(doc => {
-            if(isDealValid(doc.data())){
+            if(isDealActive(doc.data())){
                 deals.push({
                     ...doc.data(),
-                    startsAt: dayjs.unix(doc.data().startsAt.seconds),
-                    expiresAt: dayjs.unix(doc.data().expiresAt.seconds),
+                    startsAt: doc.data().startsAt.toDate(),
+                    expiresAt: doc.data().expiresAt.toDate(),
+                    createdAt: doc.data().createdAt.toDate(),
                     id: doc.id
                 })
             }
@@ -175,14 +278,14 @@ exports.getRestaurant = async (request, response) => {
         return response.status(500).json({
             error: err.code
         });
-    };  
+    }  
 }
 // GET LIST OF RESTAURANTS
 exports.getRestaurants = async (request, response) => {
     let restaurantsCollection = await getDocs(query(
         collection(db, 'Restaurants'),
         orderBy('createdAt', 'desc'),
-        limit(RESTAURANT_MAX_COUNT)
+        limit(LISTING_CONFIG.MAX_LIMIT)
     )).catch((err) => {
         console.error(err);
         return response.status(500).json({
@@ -199,7 +302,9 @@ exports.getRestaurants = async (request, response) => {
 
             // Get user 'favorite' if logged in
             let isFavorite = false;
-            const currentUser = await getCurrentUser(request, response);
+            const currentUser = await getCurrentUser(request, response).catch(() => {
+                    return null
+                });
             if(currentUser){
                 const favoritesCollection = await getDocs(query(
                     collection(db, `UserFavorites`),
@@ -267,22 +372,7 @@ exports.getRestaurants = async (request, response) => {
             }
 
             // Get restaurant deals
-            const deals = [];
-            const dealsCollection = await getDocs(query(
-                collection(db, `Deals`),
-                where('restaurantId', '==', doc.id)
-            )).catch((err) => {
-                console.error(err);
-                return;
-            });
-            dealsCollection.forEach(doc => {
-                if(isDealValid(doc.data())){
-                    deals.push({
-                        ...doc.data(),
-                        id: doc.id
-                    })
-                }
-            })
+            const deals = await getRestaurantDeals(doc.id);
 
             // Return restaurant object
             restaurants.push({
@@ -290,7 +380,7 @@ exports.getRestaurants = async (request, response) => {
                 id: doc.id,
                 isFavorite,
                 rating,
-                deals
+                deals,
             });
         }
 
@@ -382,7 +472,7 @@ exports.createRestaurant = async (request, response) => {
             restaurantCollection,
             where('userId', '==', request.user.uid)
         ));
-        console.log('asdasd ', existingRestaurant.size, auth.currentUser)
+        
         if(currentUserRestaurant.size >= MAX_RESTAURANTS_PER_USER){
             return response.status(403).json({ error: 'User already have a restaurant.' });
         }
@@ -510,7 +600,6 @@ exports.createRestaurant = async (request, response) => {
     }
 };
 
-
 exports.getRestaurantDeal = async (request, response) => {
     // Validate that restaurantId exists.
     if(!request.params.restaurantId){
@@ -522,11 +611,18 @@ exports.getRestaurantDeal = async (request, response) => {
     let documentReference = doc(db, 'Deals', request.params.dealId);
     await getDoc(documentReference)
         .then(doc => {
+            if(!isDealValid(doc.data())){
+                return response.status(404).json({
+                    error: 'Invalid deal.'
+                })
+            }
+            
             response.json({
                 ...doc.data(),
                 id: doc.id,
-                startsAt: dayjs.unix(doc.data().startsAt.seconds).format('HH:mm'),
-                expiresAt: dayjs.unix(doc.data().expiresAt.seconds).format('HH:mm')
+                startsAt: doc.data().startsAt.toDate(),
+                expiresAt: doc.data().expiresAt.toDate(),
+                createdAt: doc.data().createdAt.toDate(),
             });
         })
         .catch((err) => {
@@ -536,6 +632,36 @@ exports.getRestaurantDeal = async (request, response) => {
             });
         });
 }
+const getRestaurantDeals = async restaurantId => {
+    const deals = [];
+    
+    //
+    return new Promise((resolve, reject) => {
+        // Get restaurant deals
+        getDocs(query(
+            collection(db, `Deals`),
+            where('restaurantId', '==', restaurantId),
+            where('active', '==', true),
+            limit(LISTING_CONFIG.MAX_LIMIT)
+        )).then(dealsCollection => {
+            dealsCollection.forEach(doc => {
+                if(isDealActive(doc.data())){
+                    deals.push({
+                        ...doc.data(),
+                        startsAt: doc.data().startsAt.toDate(),
+                        expiresAt: doc.data().expiresAt.toDate(),
+                        createdAt: doc.data().createdAt.toDate(),
+                        id: doc.id
+                    })
+                }
+            })
+    
+            return resolve(deals);
+        }).catch((err) => {
+            return reject(err);
+        });
+    })
+}
 exports.getRestaurantDeals = async (request, response) => {
     // Validate that restaurantId exists.
     if(!request.params.restaurantId){
@@ -543,18 +669,9 @@ exports.getRestaurantDeals = async (request, response) => {
             error: 'Restaurant Id is required.'
         })
     }
-    
-    // Buidl query
-    let collectionQuery = query(
-        collection(db, 'Deals'),
-        where('restaurantId', '==', request.params.restaurantId),
-        where('expiresAt', '>=', Timestamp.fromDate(dayjs().add(DEALS_EXPIRY_OFFSET_MINUTES, 'minutes').toDate())),
-        where('active', '==', true),
-        limit(RESTAURANT_DEALS_COUNT_MAX)
-    );
         
     // Get deals collection
-    let dealsCollection = await getDocs(collectionQuery)
+    let dealsCollection = await getRestaurantDeals(request.params.restaurantId)
         .catch((err) => {
             console.error(err);
             return response.status(500).json({
@@ -563,23 +680,11 @@ exports.getRestaurantDeals = async (request, response) => {
         });
 
     // Response
-    if (dealsCollection.size > 0) {
-        let restaurants = [];
-        dealsCollection.forEach((doc) => {
-            restaurants.push({
-                ...doc.data(),
-                id: doc.id,
-                startsAt: dayjs.unix(doc.data().startsAt.seconds).utcOffset(UTC_OFFSET).format('HH:mm'),
-                expiresAt: dayjs.unix(doc.data().expiresAt.seconds).utcOffset(UTC_OFFSET).format('HH:mm'),
-                createdAt: dayjs.unix(doc.data().createdAt.seconds).utcOffset(UTC_OFFSET)
-            });
-        });
-        return response.json(restaurants);
-    } else {
-        return response.status(200).json([]);
+    if (dealsCollection.length > 0) {
+        return response.json(dealsCollection);
     }
+    return response.status(200).json([]);
 }
-
 
 // Get Gallery
 exports.getRestaurantGallery = async (request, response) => {
@@ -617,17 +722,35 @@ exports.getRestaurantGallery = async (request, response) => {
     }
 }
 
-
 // Serch (with Algolia)
 exports.searchRestaurants = async (request, response) => {
     const algoliaIndex = algoliaClient.initIndex(request.params.indexName);
-    const {query:searchQuery = '', ...params} = request.body;
-    
+    const { query:searchQuery = '' } = request.body;
+    const { size: userParamSize, aroundRadius: userParamRadius, p: userParamPage, ...params } = request.body;
+
+    // Validate Limit param
+    let hitsPerPage = SEARCH_CONFIG.MAX_SEARCH_RESULTS_HITS;
+    if(userParamSize && parseInt(userParamSize)){
+        hitsPerPage = userParamSize;
+    }
+
+    let aroundRadius = SEARCH_CONFIG.DEFAULT_AROUND_RADIUS;
+    if(userParamRadius && parseInt(userParamRadius)){
+        aroundRadius = userParamRadius;
+    }
+
+    let page = SEARCH_CONFIG.DEFAULT_PAGE;
+    if(userParamPage && parseInt(userParamPage)){
+        aroundRadius = userParamPage;
+    }
+
     // Query Algolia
     const queryResponse = await algoliaIndex.search(searchQuery, {
         ...params,
         //attributesToRetrieve: ['firstname', 'lastname'],
-        hitsPerPage: MAX_SEARCH_RESULTS_HITS,
+        page,
+        aroundRadius,
+        hitsPerPage,
     }).catch(err => {
         console.error(err);
         return response.status(500).json({
