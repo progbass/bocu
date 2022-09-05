@@ -7,7 +7,9 @@
     "shell": "firebase functions:shell",
     "start": "NODE_ENV=production npm run shell",
     "deploy": "NODE_ENV=production firebase deploy --only functions",
-    "logs": "firebase functions:log"
+    "logs": "firebase functions:log",
+    "test:run": "mocha --timeout 10000 --exit",
+    "test": "firebase emulators:exec 'npm run test:run'"
   },
   "engines": {
     "node": "16"
@@ -18,18 +20,23 @@
     "busboy": "^1.6.0",
     "dayjs": "^1.11.2",
     "dotenv": "^16.0.0",
+    "express": "^4.18.1",
+    "express-async-errors": "^3.1.1",
     "firebase": "^9.6.9",
     "firebase-admin": "^10.0.2",
     "firebase-functions": "^3.21.2",
     "qrcode": "^1.5.0",
     "query-string": "^7.1.1",
-    "slugify": "^1.6.5",
-    "read-excel-file": "^5.3.5"
+    "read-excel-file": "^5.3.5",
+    "slugify": "^1.6.5"
   },
   "devDependencies": {
+    "chai": "^4.3.6",
+    "chai-http": "^4.3.0",
     "eslint": "^8.9.0",
     "eslint-config-google": "^0.14.0",
-    "firebase-functions-test": "^0.2.0"
+    "firebase-functions-test": "^0.3.2",
+    "mocha": "^10.0.0"
   },
   "private": true
 }
