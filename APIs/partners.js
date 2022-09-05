@@ -23,35 +23,13 @@ const busboy = require("busboy");
 const path = require("path");
 const os = require("os");
 const fs = require("fs");
-const algoliasearch = require("algoliasearch");
 const readXlsxFile = require('read-excel-file/node');
 const dayjs = require("dayjs");
-var utc = require("dayjs/plugin/utc");
-var timezone = require("dayjs/plugin/timezone");
 const { bucket } = require("firebase-functions/v1/storage");
 const { ref, uploadBytes } = require("firebase/storage");
 const { RESERVATION_STATUS } = require('../utils/reservations-utils');
-const { MAX_CATEGORIES } = require('../utils/app-config');
-
-// Config Algolia SDK
-const algoliaClient = algoliasearch(
-  process.env.ALGOLIA_APP_ID,
-  process.env.ALGOLIA_ADMIN_API_KEY
-);
-const algoliaIndex = algoliaClient.initIndex("Restaurants");
-
-// Dates configuration.
-dayjs.extend(utc);
-dayjs.extend(timezone);
-
-// Config
-const PAGINATION_CONFIG = {
-  LIMIT: 100,
-  CURRENT: 1,
-  DEFAULT: 1
-}
-const DEAL_EXPIRY_DEFAULT_OFFSET_HOURS = 2;
-const UTC_OFFSET = -5;
+const { DEAL_EXPIRY_DEFAULT_OFFSET_HOURS, isDealValid, isDealActive } = require('../utils/deals-utils');
+const { MAX_CATEGORIES, LISTING_CONFIG } = require('../utils/app-config');
 
 //
 exports.createRestaurant = async (request, response) => {
@@ -148,7 +126,7 @@ exports.editRestaurant = async (request, response) => {
   // Limit number of categories
   let categories = restaurant.data().categories;
   if(request.body.categories){
-    categories = request.body.categories;
+    categories = request.body.categories || [];
     if(categories.length > MAX_CATEGORIES){
       response.status(409).json({message: `Exceeded maximum categories of [${MAX_CATEGORIES}]`});
     }
@@ -197,32 +175,29 @@ exports.editRestaurant = async (request, response) => {
 // Create deal
 exports.createDeal = async (request, response) => {
   // Define expiry date settings
-  const createdAt = dayjs()//.utcOffset(UTC_OFFSET);
+  const createdAt = dayjs()
 
-  let expiryTimeParts = request.body.expiresAt
-    ? request.body.expiresAt
-    : createdAt.add(DEAL_EXPIRY_DEFAULT_OFFSET_HOURS, "hour").format("hh:mm");
-  expiryTimeParts = expiryTimeParts.split(":");
-  const expiresAt = createdAt
-    .set("hour", expiryTimeParts[0])
-    .set("minutes", expiryTimeParts[1]);
+  // Define start and expiry dates
+  let expiryTimeParts = dayjs(request.body.expiresAt).isValid()
+    ? dayjs(request.body.expiresAt)
+    : createdAt.add(DEAL_EXPIRY_DEFAULT_OFFSET_HOURS, "hour");
+  //expiryTimeParts = expiryTimeParts.split(":");
+  const expiresAt = expiryTimeParts;
 
-  let startTimeParts = request.body.startsAt
-    ? request.body.startsAt
-    : createdAt.format("hh:mm");
-  startTimeParts = startTimeParts.split(":");
-  const startsAt = createdAt
-    .set("hour", startTimeParts[0])
-    .set("minutes", startTimeParts[1]);
+  let startTimeParts = dayjs(request.body.startsAt).isValid()
+    ? dayjs(request.body.startsAt)
+    : createdAt;
+  //startTimeParts = startTimeParts.split(":");
+  const startsAt = startTimeParts;
     
     // Create deal.
   let newDealItem = {
     userId: request.user.uid,
     restaurantId: request.user.restaurantId,
-    createdAt: new Timestamp(createdAt.unix()),
     dealType: Number(request.body.dealType),
     details: request.body.details ? request.body.details : "",
     discount: request.body.discount > 0 ? request.body.discount : 0,
+    createdAt: new Timestamp(createdAt.unix()),
     startsAt: new Timestamp(startsAt.unix()),
     expiresAt: new Timestamp(expiresAt.unix()),
     include_drinks: request.body.include_drinks || false,
@@ -256,7 +231,7 @@ exports.createDeal = async (request, response) => {
     ...newDealItem,
   };
 
-  //
+  // Create deal in the DB.
   const documentRef = await addDoc(
     collection(db, 'Deals'),
     newDealItem
@@ -265,21 +240,15 @@ exports.createDeal = async (request, response) => {
     return response.status(500).json({ error: err.code });
   });
 
+
+  // Return new documento in response.
   const doc = await getDoc(documentRef);
   return response.json({
     ...newDealItem,
     id: doc.id,
-    startsAt: dayjs
-      .unix(doc.data().startsAt.seconds)
-      .utcOffset(UTC_OFFSET)
-      .format("HH:mm"),
-    expiresAt: dayjs
-      .unix(doc.data().expiresAt.seconds)
-      .utcOffset(UTC_OFFSET)
-      .format("HH:mm"),
-    createdAt: dayjs
-      .unix(doc.data().createdAt.seconds)
-      .utcOffset(UTC_OFFSET),
+    startsAt: doc.data().startsAt.toDate(),
+    expiresAt: doc.data().expiresAt.toDate(),
+    createdAt: doc.data().createdAt.toDate()
   });
 };
 // Get Deals List
@@ -288,9 +257,10 @@ exports.getDeals = async (request, response) => {
   const filtersList = [where("restaurantId", "==", request.user.restaurantId)];
 
   // Filter by 'active' state (true by default)
-  if(request.query.active && request.query.active != ''){
-    let filterActive = request.query?.active && request.query?.active == 'false' ? false : true;
-    filtersList.push(where("active", "==", filterActive));
+  const filterActiveIsSet = request.query?.active !== undefined;
+  let filterByActive = filterActiveIsSet && request.query?.active == 'false' ? false : true;
+  if(filterActiveIsSet){
+    filtersList.push(where("active", "==", filterByActive));
   }
 
   // Filter by date range
@@ -298,7 +268,6 @@ exports.getDeals = async (request, response) => {
   if (range_init && range_init != '') {
     if(dayjs(range_init).isValid()){
     range_init = dayjs(dayjs(range_init).toISOString())
-      //.utcOffset(UTC_OFFSET, true)
       .toDate()
       filtersList.push(where(
         "createdAt",
@@ -314,7 +283,6 @@ exports.getDeals = async (request, response) => {
         .hour(23)
         .minute(59)
         .second(59)
-        //.utcOffset(UTC_OFFSET, true)
         .toDate()
       filtersList.push(where(
         "createdAt", 
@@ -329,7 +297,7 @@ exports.getDeals = async (request, response) => {
     collection(db, `Deals`),
     ...filtersList,
     // orderBy(request.params.o || 'createdAt', 'desc'),
-    limit(PAGINATION_CONFIG.LIMIT)
+    limit(LISTING_CONFIG.MAX_LIMIT)
   );
   
   // Get the last visible document
@@ -360,24 +328,26 @@ exports.getDeals = async (request, response) => {
           });
         })
 
-      //
+      // Filter Out Deals that are not valid
+      if(!isDealValid(deal.data())){
+        continue;
+      }
+
+      // Filter out deals that are not active
+      if(filterByActive && !isDealActive(deal.data())){
+        continue;
+      }
+
+      // Return deals
       deals.push({
         ...deal.data(),
         restaurant: restaurant.get('name'),
         id: deal.id,
-        startsAt: dayjs
-          .unix(deal.data().startsAt?.seconds)
-          .utcOffset(UTC_OFFSET)
-          .format("HH:mm"),
-        expiresAt: dayjs
-          .unix(deal.data().expiresAt?.seconds)
-          .utcOffset(UTC_OFFSET)
-          .format("HH:mm"),
-        createdAt: dayjs
-          .unix(deal.data().createdAt?.seconds)
-          .utcOffset(UTC_OFFSET),
+        startsAt: deal.data().startsAt.toDate(),
+        expiresAt: deal.data().expiresAt.toDate(),
+        createdAt: deal.data().createdAt.toDate()
       });  
-    };
+    }
 
     return response.json(deals);
   } else {
@@ -396,20 +366,19 @@ exports.getDeal = async (request, response) => {
   });
 
   if (docSnap.exists()) {
+    // Filter Out Deals that are not valid
+    if(!isDealValid(docSnap.data())){
+      return response.status(204).json({
+        error: "The deal was not found.",
+      });
+    }
+
     return response.json({
       id: docSnap.id,
       ...docSnap.data(),
-      startsAt: dayjs
-        .unix(docSnap.data().startsAt?.seconds)
-        .utcOffset(UTC_OFFSET)
-        .format("HH:mm"),
-      expiresAt: dayjs
-        .unix(docSnap.data().expiresAt?.seconds)
-        .utcOffset(UTC_OFFSET)
-        .format("HH:mm"),
-      createdAt: dayjs
-        .unix(docSnap.data().createdAt?.seconds)
-        .utcOffset(UTC_OFFSET),
+      startsAt: docSnap.data().startsAt.toDate(),
+      expiresAt: docSnap.data().expiresAt.toDate(),
+      createdAt: docSnap.data().createdAt.toDate()
     });
   } else {
     return response.status(204).json({
@@ -433,41 +402,11 @@ exports.updateDeal = async (request, response) => {
   }
 
   //
-  const {createdAt, ...updateObject} = request.body;
-  
-
-  // Transform hh:mm into a valid date before storing into database
-  if (updateObject.startsAt) {
-    const currentStartTime = dayjs
-      .unix(deal.data().startsAt.seconds)
-      .utc()
-      .utcOffset(UTC_OFFSET);
-    let startTimeParts = updateObject.startsAt.split(":");
-    const startsAt = currentStartTime
-      .set("hour", startTimeParts[0])
-      .set("minutes", startTimeParts[1]);
-
-    // ToDo: Validate date or return error
-
-    // Overwrite original data
-    updateObject.startsAt = Timestamp.fromDate(startsAt.toDate());
-  }
-  if (updateObject.expiresAt) {
-    const currentExpiryTime = dayjs
-      .unix(deal.data().expiresAt.seconds)
-      .utc()
-      .utcOffset(UTC_OFFSET);
-    let expiryTimeParts = updateObject.expiresAt.split(":");
-    const expiresAt = currentExpiryTime
-      .set("hour", expiryTimeParts[0])
-      .set("minutes", expiryTimeParts[1]);
-
-    // ToDo: Validate date or return error
-
-    // Overwrite original data
-    updateObject.expiresAt = Timestamp.fromDate(
-      expiresAt.toDate()
-    );
+  const updateObject = {
+    ...request.body,
+    createdAt: deal.get("createdAt"),
+    startsAt: Timestamp.fromDate(new Date(request.body.startsAt)),
+    expiresAt: Timestamp.fromDate(new Date(request.body.expiresAt))
   }
 
   // Update record
@@ -478,17 +417,9 @@ exports.updateDeal = async (request, response) => {
     getDoc(docRef).then((documentSnapshot) => {
       response.json({
         ...documentSnapshot.data(),
-        startsAt: dayjs
-          .unix(documentSnapshot.data().startsAt?.seconds)
-          .utcOffset(UTC_OFFSET)
-          .format("HH:mm"),
-        expiresAt: dayjs
-          .unix(documentSnapshot.data().expiresAt?.seconds)
-          .utcOffset(UTC_OFFSET)
-          .format("HH:mm"),
-        createdAt: dayjs
-          .unix(documentSnapshot.data().createdAt?.seconds)
-          .utcOffset(UTC_OFFSET),
+        startsAt: documentSnapshot.data().startsAt.toDate(),
+        expiresAt: documentSnapshot.data().expiresAt.toDate(),
+        createdAt: documentSnapshot.data().createdAt.toDate()
       });
     });
   }).catch((err) => {
@@ -526,15 +457,15 @@ exports.deleteDeal = async (request, response) => {
 
 // Get Reservation List
 exports.getReservationsList = async (request, response) => {
-  const todayDate = dayjs.utc().utcOffset(UTC_OFFSET);
+  const todayDate = dayjs();;
   const filtersList = [
     where("restaurantId", "==", request.user.restaurantId)
   ];
 
   // Filter by 'active' state (true by default)
   if(request.query.active && request.query.active != ''){
-    let filterActive = request.query?.active && request.query?.active == 'false' ? false : true;
-    filtersList.push(where("active", "==", filterActive));
+    let filterByActive = request.query?.active && request.query?.active == 'false' ? false : true;
+    filtersList.push(where("active", "==", filterByActive));
   }
 
   // Filter by date range
@@ -585,7 +516,7 @@ exports.getReservationsList = async (request, response) => {
         statusCode = RESERVATION_STATUS.RESERVATION_EXPIRED;
         break;
       case "fulfilled":
-        statusCode = RESERVATION_STATUS.RESERVATION_FULFILLED;
+        statusCode = RESERVATION_STATUS.COMPLETED;
         break;
       case "restaurant-canceled":
         statusCode = RESERVATION_STATUS.RESTAURANT_CANCELED;
@@ -617,7 +548,7 @@ exports.getReservationsList = async (request, response) => {
   // Response
   if (collectionReference.size > 0) {
     let deals = [];
-    for (document of collectionReference.docs) {
+    for (let document of collectionReference.docs) {
       const reservation = document.data();
       
       // Get Deal
