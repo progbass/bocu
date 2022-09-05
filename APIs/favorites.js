@@ -7,18 +7,14 @@ const {
     deleteDoc,
     collection, 
     where, 
+    limit,
     Timestamp, 
 } = require('firebase/firestore');
-const { db } = require('../utils/admin');
 const dayjs = require('dayjs');
-var utc = require('dayjs/plugin/utc');
-var timezone = require('dayjs/plugin/timezone');
-const { isDealValid } = require('../utils/deals-utils');
+const { db } = require('../utils/admin');
+const { LISTING_CONFIG } = require('../utils/app-config');
+const { isDealActive } = require('../utils/deals-utils');
 
-// Dates configuration.
-dayjs.extend(utc);
-dayjs.extend(timezone);
-const UTC_OFFSET = -5;
 
 // Add favorite
 exports.addFavorite = async (request, response) => {
@@ -75,7 +71,8 @@ exports.getFavorites = async (request, response) => {
     // Build query
     let favoritesQuery = query(
         collection(db, `UserFavorites`),
-        where('userId', '==', request.user.uid)
+        where('userId', '==', request.user.uid),
+        limit(LISTING_CONFIG.MAX_LIMIT)
     )
 
     // Get collection
@@ -157,7 +154,7 @@ exports.getFavorites = async (request, response) => {
 
             //
             dealsCollection.forEach(val => {
-                if(isDealValid(val.data())){
+                if(isDealActive(val.data())){
                     deals.push({
                         ...val.data(),
                         id: val.id
@@ -172,7 +169,7 @@ exports.getFavorites = async (request, response) => {
                 deals,
                 rating,
                 id: restaurant.id,
-                createdAt: dayjs.unix(fav.data().createdAt._seconds).utcOffset(UTC_OFFSET)
+                createdAt: fav.data().createdAt.toDate()
             });
         }
         return response.json(favorites);
