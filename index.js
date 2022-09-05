@@ -3,33 +3,16 @@ const functions = require("firebase-functions");
 const app = require("express")();
 const bodyParser = require("body-parser");
 const cors = require("cors");
+const { collection, getDocs, query, updateDoc, where } = require('firebase/firestore');
 const algoliasearch = require("algoliasearch");
-const { config } = require("dotenv");
 const { db } = require('./utils/admin');
-// const { initializeApp } = require('firebase/app');
-// const { getAuth } = require("firebase/auth");
-// const config = require('./utils/config');
-// const app = initializeApp(config);
-// const auth = getAuth();
-//const { admin, db } = require('./utils/admin');
+const { USER_ROLES } = require('./utils/app-config');
 const { isAuthenticated, isAuthorizated } = require("./utils/auth");
+const { RESERVATION_STATUS } = require('./utils/reservations-utils');
 const { updateDealStatus } = require("./utils/update-deal-status");
 const {
   updateReservationStatus,
 } = require("./utils/update-reservation-status");
-
-//
-const RESERVATION_STATUS = {
-  AWAITING_CUSTOMER: 1,
-  USER_CANCELED: 2,
-  TOLERANCE_TIME: 3,
-  RESERVATION_EXPIRED: 4, 
-  RESERVATION_FULFILLED: 5,
-  RESTAURANT_CANCELED: 6,
-  OTHER: 7,
-  DEAL_EXPIRED: 8,
-  DEAL_CANCELED: 9
-}
 
 // 'Global' configuration
 const NODE_ENV = process.env.NODE_ENV || 'production';
@@ -51,11 +34,12 @@ const algoliaClient = algoliasearch(
 const algoliaIndex = algoliaClient.initIndex("Restaurants");
 
 const {
-  getUserFavorites,
   getUserDeals,
   getUserRestaurants,
   createUser,
-  //getUser,
+  getUser,
+  deleteUser,
+  getUsers,
   getCurrentUser,
   editUser,
   isUsernameAvailable,
@@ -94,6 +78,7 @@ const {
 const {
   getRestaurant,
   getRestaurants,
+  testFunction,
   getRestaurantDeal,
   getRestaurantDeals,
   getRestaurantGallery,
@@ -117,21 +102,27 @@ const {
   removeFavorite,
 } = require("./APIs/favorites");
 
-const { loginUser, logoutUser } = require("./APIs/auth");
-const { get } = require("firebase/database");
+const { loginUser, logoutUser, resetPassword, verificateUserEmail } = require("./APIs/auth");
+const { setUserRole } = require("./APIs/admin");
+
 
 app.post("/auth/login", loginUser);
-app.post("/auth/logout", logoutUser);
+app.post("/auth/logout", isAuthenticated, logoutUser);
+app.post("/auth/password-reset/:email", resetPassword);
+app.post("/auth/email-verification/:userId", verificateUserEmail);
 
+// Users
+app.get("/users", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), getUsers);
 app.post("/user", createUser);
 app.get("/user", isAuthenticated, getCurrentUser);
-//app.get('/user/:userId', getUser);
-app.put("/user/:userId/edit", editUser);
-app.get("/user/:userId/favorites", getUserFavorites);
+app.get('/user/:userId', getUser);
+app.put("/user/:userId", editUser);
+app.delete("/user/:userId", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), deleteUser);
 app.get("/user/:userId/deals", getUserDeals);
 app.get("/user/:userId/restaurants", getUserRestaurants);
 app.get("/user/:email/available", isUsernameAvailable);
 
+// Reservations
 app.get("/reservations/:reservationId", isAuthenticated, getReservation);
 app.post("/reservations", isAuthenticated, createReservation);
 app.delete("/reservations/:reservationId", isAuthenticated, cancelReservation);
@@ -160,10 +151,11 @@ app.get(
 );
 
 app.get("/restaurants", getRestaurants);
+app.get("/restaurant", getRestaurant);
 app.post("/restaurant", isAuthenticated, createRestaurantGeneral);
 app.get("/restaurant/:restaurantId", getRestaurant);
-app.delete("/restaurant/:restaurantId", deleteRestaurantGeneral);
-app.put("/restaurant/:restaurantId", isAuthenticated, editRestaurantGeneral); //, isAuthorizated({hasRole: ['super_admin']}),
+app.delete("/restaurant/:restaurantId", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), deleteRestaurantGeneral);
+app.put("/restaurant/:restaurantId", isAuthenticated, editRestaurantGeneral);
 app.get("/restaurant/:restaurantId/deals", getRestaurantDeals);
 app.get("/restaurant/:restaurantId/deals/:dealId", getRestaurantDeal);
 app.get("/restaurant/:restaurantId/photos", getRestaurantGallery);
@@ -180,9 +172,22 @@ app.delete("/favorites/:restaurantId", isAuthenticated, removeFavorite);
 // Search
 app.post("/search/:indexName/query", searchRestaurants);
 
+// Admin
+app.post("/admin/setUserRole", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), setUserRole);
+
 // Utils
 app.post("/import/restaurants", importRestaurants);
 app.put("/update/restaurants", updateAllRestaurants);
+
+//
+const handleError = async (err, req, res) => {
+  //console.log(err);
+  return res.status(err.status).json({ ...err, error: err.message });
+  //res.status(400).send(err);
+}
+app.use(handleError);
+
+
 //app.post('/deals/deleteAllDeals', isAuthenticated, deleteAllDeals); // <------ DAnGEROUS UTILITY
 // app.get('/deals-status', isAuthenticated, updateDealStatus) // <-- UTILITY
 // app.get('/reservation-status', isAuthenticated, updateReservationStatus); // <-- UTILITY
@@ -193,7 +198,7 @@ exports.api = functions.https.onRequest(app);
 ////////////////////////////////////////
 // CronJobs
 exports.updateDealStatus = functions.pubsub
-  .schedule("*/1 * * * *")
+  .schedule("*/15 * * * *")
   .timeZone("America/Mexico_City")
   .onRun(updateDealStatus);
 
@@ -244,10 +249,11 @@ exports.updateReservationStatus = functions.pubsub
       /*--------------------- ALGOLIA ---------------------*/
       // Verify if restaurant has active deals
       let hasDeals = false;
-      const dealsList = await db.collection('Deals')
-        .where('restaurantId', '==', snap.after.id)
-        .where('status', '==', true)
-        .get();
+      const dealsList = await getDocs(query(
+        collection(db, 'Deals'),
+        where('restaurantId', '==', snap.after.id),
+        where('status', '==', true)
+      ));
       if(dealsList.size){
         hasDeals = true;
       }
@@ -350,14 +356,17 @@ exports.updateReservationStatus = functions.pubsub
 
       // Cancel all reservations linked to the deal
       if(!deal.active){
-        const reservationsCollection = db.collection('Reservations')
-        .where('dealId', '==', snap.after.id)
-        .where('active', '==', true);
-        const reservations = await reservationsCollection.get();
+        const reservationsCollection = query(
+          collection(db, 'Reservations'),
+          where('dealId', '==', snap.after.id),
+          where('active', '==', true)
+        );
+        const reservations = await getDocs(reservationsCollection);
         
         if(reservations.size){
           for(const reservation of reservations.docs){
-            await reservation.ref.update({
+            await updateDoc(
+              reservation.ref,{
               active: false,
               status: RESERVATION_STATUS.DEAL_CANCELED
             })
@@ -412,14 +421,17 @@ exports.updateReservationStatus = functions.pubsub
       const deal = snap.data();
 
       // Cancel all reservations linked to the deal
-      const reservationsCollection = db.collection('Reservations')
-        .where('dealId', '==', snap.id)
-        .where('active', '==', true);
-      const reservations = await reservationsCollection.get();
+      const reservationsCollection = query(
+        collection(db, 'Reservations'),
+        where('dealId', '==', snap.id),
+        where('active', '==', true)
+      );
+      const reservations = await getDocs(reservationsCollection);
       
       if(reservations.size){
         for(const reservation of reservations.docs){
-          await reservation.ref.update({
+          await updateDoc(
+            reservation.ref, {
             active: false,
             status: RESERVATION_STATUS.DEAL_CANCELED
           })
@@ -465,9 +477,10 @@ exports.updateReservationStatus = functions.pubsub
       const ratingObject = snap.data();
 
       // Get collection
-      const raitingRef = await db.collection(`RestaurantRatings`)
-      .where('restaurantId', '==', ratingObject.restaurantId)
-      .get()
+      const raitingRef = await getDocs(query(
+        collection(db, `RestaurantRatings`),
+        where('restaurantId', '==', ratingObject.restaurantId)
+      ))
       .catch((err) => {
           console.error(err);
           return;
@@ -535,10 +548,10 @@ exports.updateReservationStatus = functions.pubsub
       const ratingObject = snap.after.data();
 
       // Get collection
-      const raitingRef = await db.collection(`RestaurantRatings`)
-      .where('restaurantId', '==', ratingObject.restaurantId)
-      .get()
-      .catch((err) => {
+      const raitingRef = await getDocs(query(
+        collection(db, `RestaurantRatings`),
+        where('restaurantId', '==', ratingObject.restaurantId)
+      )).catch((err) => {
           console.error(err);
           return;
       });
@@ -605,10 +618,10 @@ exports.updateReservationStatus = functions.pubsub
       const ratingObject = snap.data();
 
       // Get collection
-      const raitingRef = await db.collection(`RestaurantRatings`)
-      .where('restaurantId', '==', ratingObject.restaurantId)
-      .get()
-      .catch((err) => {
+      const raitingRef = await getDocs(query(
+        collection(db, `RestaurantRatings`),
+        where('restaurantId', '==', ratingObject.restaurantId)
+      )).catch((err) => {
           console.error(err);
           return;
       });
