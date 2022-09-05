@@ -1,10 +1,41 @@
-const { db, adminAuth } = require('./admin');
-const { doc, getDocs, getDoc, query, where, collection } = require('firebase/firestore');
+const { db, auth } = require("./admin");
+const {
+  signInWithCustomToken,
+  onAuthStateChanged,
+  confirmPasswordReset,
+} = require("firebase/auth");
+const {
+  doc,
+  getDocs,
+  getDoc,
+  query,
+  where,
+  collection,
+} = require("firebase/firestore");
+const { getCurrentUser: getUserData } = require("./auth");
 
 module.exports = async (request, response) => {
-	return new Promise(async (resolve, reject) => {
-        // Get Auth Id token
-        let idToken;
+  return new Promise((resolve, reject) => {
+    // Verify that token is present
+	if (!request.headers.authorization && !request.headers.authorization.startsWith('Bearer ')) {
+		console.error('No token found');
+		return response.status(403).json({ error: 'Unauthorized' });
+	}
+	
+	// Get token
+	const idToken = request.headers.authorization.split('Bearer ')[1];
+
+    //
+    try {
+        const user = getUserData(auth, idToken);
+        resolve(user);
+    } catch(err) {
+        reject(err);
+      }
+    });
+
+    // Get Auth Id token
+    /* let idToken;
         if (request.headers.authorization && request.headers.authorization.startsWith('Bearer ')) {
             idToken = request.headers.authorization.split('Bearer ')[1];
         } else {
@@ -15,7 +46,7 @@ module.exports = async (request, response) => {
             //
             let user = {};
             //auth
-            const decodedToken = await adminAuth.verifyIdToken(idToken)
+            const decodedToken = await signInWithCustomToken(auth, idToken) // await adminAuth.verifyIdToken(idToken)
                 .catch((err) => {
                     console.error('Error while verifying token', err);
                     return resolve(undefined);
@@ -45,6 +76,6 @@ module.exports = async (request, response) => {
         } catch(err) {
             console.log (err)
             resolve(undefined);
-        };
-    });
+        }; 
+  });*/
 };

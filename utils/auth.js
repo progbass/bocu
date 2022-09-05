@@ -1,24 +1,34 @@
 const { onAuthStateChanged, signInWithCustomToken } = require('firebase/auth');
-const { firebase  } = require('firebase-admin')
 const { doc, getDocs, getDoc, query, where, collection } = require('firebase/firestore');
 const { auth, db, adminAuth } = require('./admin');
+const { USER_ROLES } = require('./app-config');
+const { CustomError } = require('./CustomError');
 
 exports.isAuthenticated = async (request, response, next) => {
-	let userLoaded =  false;
-	console.log('Checkoing authentication')
+	
 
-	// Get Auth Id token
-	let idToken;
-	if (request.headers.authorization && request.headers.authorization.startsWith('Bearer ')) {
-		idToken = request.headers.authorization.split('Bearer ')[1];
-	} else {
+	// Verify that token is present
+	if (!request.headers.authorization || !request.headers.authorization.startsWith('Bearer ')) {
 		console.error('No token found');
-		return response.status(403).json({ error: 'Unauthorized' });
-	} //const userToken = await userData.user.getIdToken();
+		return next(new CustomError({message: 'Unauthorized', status: 403}));
+	}
+	
+	//const userToken = await userData.user.getIdToken();
+	const idToken = request.headers.authorization.split('Bearer ')[1];
 
+	try {
+		request.user = await getCurrentUser(auth, idToken);
+		return next();
+	}
+	catch (err) {
+		console.error(`${err.code} -  ${err.message}`)
+		return next(new CustomError({message: 'Unauthorized', status: 403}));
+	}
+
+	/*
+	let userLoaded =  false;
 	await onAuthStateChanged(auth, async userToken => {
 		if (userToken && !userLoaded) {
-			//request.user = user;
 			userLoaded = true;
 
 			// Get user data
@@ -56,9 +66,56 @@ exports.isAuthenticated = async (request, response, next) => {
 		}
 	});
     //
+	*/
 };
 
+exports.isAuthorizated = (opts = { hasRole: [], allowSameUser: true }) => {
+	return async (req, res, next) => {
+		const roles_list = [
+			USER_ROLES.SUPER_ADMIN,
+			USER_ROLES.ADMIN,
+			USER_ROLES.PARTNER,
+			USER_ROLES.CUSTOMER
+		]
 
+		//if (opts.allowSameUser && id && uid === id)
+			//return next();
+		//if (!role)
+			//return res.status(403).send();
+ 
+		const authorized = opts.hasRole.find((role) => {
+			return (roles_list.includes(role)) && req.user?.role === role
+		});
+		if (authorized)
+			return next();
+ 
+		return res.status(403).send();
+	}
+}
+const getCurrentUser = async (auth, idToken) => {
+	const userToken = await signInWithCustomToken(auth, idToken)//await adminAuth.verifyIdToken(idToken);
+	const role = (await userToken.user.getIdTokenResult()).claims?.role;
+	
+	// Get user data
+	const userData = await formatUserData(userToken.user.uid);
+	return {
+		...userData,
+		uid: userToken.user.uid,
+		token: idToken,
+		accessToken: idToken,
+		displayName: userToken.user.displayName,
+		email: userToken.user.email,
+		emailVerified: userToken.user.emailVerified,
+		phoneNumber: userToken.user.phoneNumber,
+		photoURL: userToken.user.photoURL,
+		isAnonymous: userToken.user.isAnonymous,
+		tenantId: userToken.user.tenantId,
+		providerData: userToken.user.providerData,
+		metadata: userToken.user.metadata,
+		role
+	} 
+}
+module.exports.getCurrentUser = getCurrentUser;
 const formatUserData = async userId => {
 	// Get User from DB
 	const userDB = await getUser(userId);
@@ -76,8 +133,7 @@ const getUser = async userId => {
 	const user = await getDoc(
 		doc(db, 'Users', userId)
 	).catch(err => {
-		console.log(err)
-		return response.status(500).json(err);
+		return err;
 	})
 
 	return user ? user.data() : {};
@@ -87,35 +143,7 @@ const getRestaurants = async userId => {
 		collection(db, 'Restaurants'),
 		where("userId", "==", userId)
 	)).catch(err => {
-		console.log(err)
-		return response.status(500).json(err);
+		return err;
 	});
 	return userRestaurant.size ? userRestaurant.docs : [];
-}
-
-exports.isAuthorizated = (opts = { hasRole: [], allowSameUser: true }) => {
-	return async (req, res, next) => {
-		const roles_list = [
-			'super_admin',
-			'admin',
-			'owner',
-			'reader'
-		]
-		const { role, email, uid } = res.locals;
-		const { id } = req.params;
-
-		//const test = adminAuth.verifyIdToken()
-		//if (opts.allowSameUser && id && uid === id)
-			//return next();
-		//if (!role)
-			//return res.status(403).send();
- 
-		const authorized = opts.hasRole.find((role) => {
-			return (roles_list.includes(role)) && req.user?.[role] === true
-		});
-		if (authorized)
-			return next();
- 
-		return res.status(403).send();
-	}
 }
