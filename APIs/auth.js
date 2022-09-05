@@ -1,6 +1,7 @@
 const { 
     signInWithEmailAndPassword, 
     signOut,
+    signInWithCustomToken,
     setPersistence,
     sendPasswordResetEmail,
     sendEmailVerification
@@ -13,43 +14,36 @@ const {
   } = require('firebase/firestore' );
 const { validateLoginData, validateSignUpData } = require('../utils/validators');
 const { auth, adminAuth, db } = require('../utils/admin');
+const { getCurrentUser } = require('../utils/auth');
+const { CustomError } = require('../utils/CustomError')
 
+const signIn = async (uid) => {
+    const customUserToken = await adminAuth.createCustomToken(uid);
+    return await getCurrentUser(auth, customUserToken);
+}
+module.exports.signIn = signIn;
 exports.loginUser = async (request, response) => {
     //
     let userCredentials = {
-        email: request.body.email,
-		password: request.body.password
+        email: request.body?.email,
+		password: request.body?.password
 	}
 	const { valid, errors } = validateLoginData(userCredentials);
 	if (!valid) return response.status(400).json(errors);
 
     // Sign in with email/password provider
-    await auth.setPersistence('SESSION');
+    await setPersistence(auth, 'NONE');
     const userAuth = await signInWithEmailAndPassword(auth, userCredentials.email, userCredentials.password)
         .catch((error) => {
-            console.error(error);
-            return response.status(403).json({ general: 'wrong credentials, please try again' });
+            //console.error(error);
+            throw new CustomError({ status: 403, message: 'Wrong credentials, please try again' });
         })
-    //
-    // const test = await adminAuth.getUserByEmail('hello@world.com');
-    // console.log(test);
-    // await adminAuth.setCustomUserClaims(undefined, {
-    //     admin: true
-    // })
+    
+    await signOut(auth);
 
-    const customUserToken = await adminAuth.createCustomToken(userAuth.user.uid);
-    const { stsTokenManager, auth: authObj, reloadListener, reloadUserInfo, proactiveRefresh, ...userData } = userAuth.user;
-    
-    // Get user's restaurant
-	let userRestaurant = await getRestaurants(userData.uid);
-	userRestaurant = userRestaurant.length ? userRestaurant[0].id : null;
-    
-    return response.json({ 
-        ...userData, 
-        accessToken: customUserToken,
-        token: customUserToken,
-        restaurantId: userRestaurant
-    });
+    // Sign in user again, but with custom token
+    const data = await signIn(userAuth.user.uid)
+    return response.json(data);
 };
 
 exports.logoutUser = async (request, response) => {
