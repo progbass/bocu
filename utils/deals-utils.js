@@ -1,12 +1,13 @@
 const dayjs = require('dayjs');
 
 // Config
-const UTC_OFFSET = -5;
+exports.DEAL_EXPIRY_DEFAULT_OFFSET_HOURS = 2;
 
-//
-exports.isDealValid = (deal) => {
-    // Config
-    let isValid = false;
+exports.isDealActive = deal => {
+    // Verify that deal is valid
+    if(!isDealValid(deal)){
+        return false;
+    }
 
     // Is active
     if(!deal.active){
@@ -18,12 +19,30 @@ exports.isDealValid = (deal) => {
         return false;
     }
 
-    // Check expry date
+    // Check expiry date
     const now = dayjs();
-    if(now > dayjs.unix(deal.expiresAt.seconds).utcOffset(UTC_OFFSET)){
+    if(now.isAfter(deal.expiresAt.toDate())){
         return false
+    }
+
+    return true;
+}
+
+//
+const isDealValid = (deal) => {
+
+    // Check that dates are valid.
+    if(
+        !dayjs.unix(deal.startsAt?.seconds).isValid() ||
+        !dayjs.unix(deal.expiresAt?.seconds).isValid() ||
+        !dayjs.unix(deal.createdAt?.seconds).isValid() ||
+        !deal.restaurantId ||
+        !deal.userId
+    ){
+        return false;
     }
 
     //
     return true;
 }
+exports.isDealValid = isDealValid;
