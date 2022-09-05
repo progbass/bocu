@@ -12,15 +12,10 @@ const {
     orderBy
 } = require('firebase/firestore');
 const { db, app } = require('../utils/admin');
+const { isDealActive, isDealValid } = require('../utils/deals-utils');
 const { RESERVATION_STATUS } = require('../utils/reservations-utils');
 const dayjs = require('dayjs');
-var utc = require('dayjs/plugin/utc');
-var timezone = require('dayjs/plugin/timezone');
 
-// Dates configuration.
-dayjs.extend(utc)
-dayjs.extend(timezone)
-dayjs.tz.setDefault("America/Mexico_City")
 
 // Config.
 const UTC_OFFSET = -5;
@@ -37,56 +32,89 @@ exports.createReservation = async (request, response) => {
             customerId: request.user.uid,
             dealId: request.body.dealId,
             restaurantId: request.body.restaurantId,
-            reservationDate: Timestamp.fromDate(dayjs.utc(request.body.reservationDate).utcOffset(UTC_OFFSET).toDate()),
-            createdAt: Timestamp.fromDate(dayjs.utc().utcOffset(10).toDate()),
+            reservationDate: Timestamp.fromDate(dayjs(request.body.reservationDate).toDate()),
+            createdAt: Timestamp.fromDate(dayjs().toDate()),
             cancelledAt: null,
         };
 
         // Get collection
         const reservationsCollection = collection(db, 'Reservations');
 
-        // ToDo: Invalidar el resto de las reservaciones del usuario?
+        // Get active deals from current user that match the same restaurant.
+        let userReservations = await getDocs(query(
+            collection(db, 'Reservations'),
+            where('active', '==', true),
+            where('customerId', '==', request.user.uid),
+            where('restaurantId', '==', request.body.restaurantId),
+            where('dealId', '>=', request.body.dealId)
+        ));
+        let reservation;
+
+        // No more than 1 reservation for the same deal per user.
+        if(userReservations.size > 0){
+            return response.status(400).json({
+                message: 'You already have a reservation for this deal.'
+            })
+        }
+
+        // Dont allow reservations on past dates.
+        if(dayjs(newReservation.reservationDate.toDate()).isBefore(dayjs())){
+            return response.status(400).json({
+                message: 'Cannot create reservations for a past date.'
+            })
+        }
 
         // Get related deal
         const dealRef = doc(db, `Deals/`, request.body.dealId);
         let deal = await getDoc(dealRef);
         if(!deal.exists()){
             return response.status(400).json({
-                error: 'Deal not found.'
+                message: 'Deal not found.'
             }) 
         }
-        if(!deal.get('active')){
+        if(!isDealValid(deal.data())){
+            return response.status(400).json({
+                error: 'Deal is invalid.'
+            }) 
+        }
+        if(!isDealActive(deal.data())){
+            if(deal.get('useCount') >= deal.get('useMax')){
+                await updateDoc(dealRef, {active: false});
+    
+                return response.status(400).json({
+                    error: 'Number of reservations exceeded.'
+                }) 
+            }
+            
             return response.status(400).json({
                 error: 'Deal has been deactivated.'
             }) 
         }
-        // Validate that there are still 'use counts' avaliable for the deal.
-        if(deal.get('useCount') >= deal.get('useMax')){
-            await updateDoc(dealRef, {active: false});
-
+        if(dayjs(newReservation.reservationDate.toDate()).isAfter(deal.get('expiresAt').toDate())){
             return response.status(400).json({
-                error: 'Number of reservations exceeded.'
+                error: 'Cannot make a reservation after deal expires.'
             }) 
         }
+
         // Update deal use count
         await updateDoc(dealRef, {useCount: deal.get('useCount')+1});
         deal = await getDoc(dealRef);
-        // Update
+
+        // Validate max use count and deactivate deal if necessary
         if(deal.get('useCount') >= deal.get('useMax')){
             await updateDoc(dealRef, {active: false});
         }
 
-
         // Add new reservation
         const reservationRef = await addDoc(reservationsCollection, newReservation)
-        const reservation = await getDoc(reservationRef);
+        reservation = await getDoc(reservationRef);
         
         // Send confirmation to user
         return response.status(200).json({ 
             ...reservation.data(), 
             id: reservation.id,
-            createdAt: dayjs(dayjs.unix(reservation.data().createdAt.seconds)).tz('America/Mexico_City', false).toDate(),
-            reservationDate: dayjs.unix(reservation.get('reservationDate').seconds)
+            createdAt: reservation.get('createdAt').toDate(),
+            reservationDate: reservation.get('reservationDate').toDate()
         })
     } catch (err){
         console.log(err)
