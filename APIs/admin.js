@@ -18,6 +18,7 @@ const {
   limit,
   Timestamp,
 } = require("firebase/firestore");
+const functions = require("firebase-functions");
 const dayjs = require("dayjs");
 const { user } = require("firebase-functions/v1/auth");
 const { USER_ROLES, LISTING_CONFIG } = require("../utils/app-config");
@@ -27,6 +28,7 @@ function handleError(res, err) {
   return res.status(500).send({ message: `${err.code} - ${err.message}` });
 }
 
+//
 exports.setUserRole = async (req, res) => {
   try {
     const { uid, role } = req.body;
@@ -57,7 +59,7 @@ exports.editUser = async (request, response) => {
       ...request.body,
     })
     .catch((err) => {
-      return response.status(404).json({ error: "User not found" });
+      return response.status(404).json({ message: "Usuario no encontrado." });
     });
 
   //
@@ -70,7 +72,7 @@ exports.editUser = async (request, response) => {
     return response.json({ ...user.toJSON(), ...userNode });
   }
   //
-  return response.status(404).json({ error: "User not found" });
+  return response.status(404).json({ message: "Usuario no encontrado." });
 
   // updateDoc(
   // 	doc(db, `/Users/`, request.params.userId),
@@ -93,12 +95,13 @@ exports.deleteUser = async (request, response) => {
   // Remove user from firestore
   await deleteDoc(userDoc).catch((err) => {
     return response.status(500).json({
-      error: err.code,
+      ...err,
+      message: 'Error al eliminar el usuario.',
     });
   });
 
   // Remove from Firebase Authentication module
-  const authError = "";
+  let authError = "";
 
   try {
     await adminAuth.deleteUser(user.get("authId"));
@@ -111,4 +114,34 @@ exports.deleteUser = async (request, response) => {
   }
 
   return response.status(200).json({ message: "Success", error: authError });
+};
+
+//
+exports.syncAuthToFirestoreUsers = async (req, res) => {
+  try {
+    const usersAuth = await adminAuth.listUsers();
+    if(usersAuth.users.length > 0) {
+      usersAuth.users.forEach(async (user) => {
+        const userDoc = await getDoc(doc(db, "Users", user.uid));
+        if(!userDoc.exists()) {
+          await setDoc(doc(db, "Users", user.uid), {
+            authId: user.uid,
+            email: user.email,
+            firstName: user.displayName ? user.displayName : '',
+            lastName: user.lastName ? user.lastName : '',
+            role: user.customClaims ? user.customClaims.role : USER_ROLES.CUSTOMER,
+            createdAt: dayjs().toDate(),
+            updatedAt: dayjs().toDate()
+          });
+        }
+      });
+    }
+    // Response
+    return res.json({
+      message: "Synced successfully"
+    });
+  } catch (err) {
+    functions.logger.error(err);
+    return handleError(res, err);
+  }
 };
