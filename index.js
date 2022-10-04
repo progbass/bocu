@@ -3,12 +3,15 @@ const functions = require("firebase-functions");
 const app = require("express")();
 const bodyParser = require("body-parser");
 const cors = require("cors");
-const { collection, getDocs, query, updateDoc, where } = require('firebase/firestore');
+const { collection, getDocs, query, updateDoc, where, addDoc, setDoc, doc, Timestamp } = require('firebase/firestore');
 const algoliasearch = require("algoliasearch");
-const { db } = require('./utils/admin');
+const { db, adminDb } = require('./utils/admin');
 const { USER_ROLES } = require('./utils/app-config');
 const { isAuthenticated, isAuthorizated } = require("./utils/auth");
 const { RESERVATION_STATUS } = require('./utils/reservations-utils');
+const {
+  shouldPublishRestaurant
+} = require("./utils/restaurant-utils");
 const { updateDealStatus } = require("./utils/update-deal-status");
 const {
   updateReservationStatus,
@@ -35,21 +38,22 @@ const algoliaIndex = algoliaClient.initIndex("Restaurants");
 
 const {
   getUserDeals,
-  getUserRestaurants,
   createUser,
   getUser,
   deleteUser,
   getUsers,
   getCurrentUser,
+  getUserReservations,
   editUser,
   isUsernameAvailable,
-
-  getPartnerRestaurant,
 } = require("./APIs/users");
 
 const {
+  getPartnerRestaurant,
+  getPartnerRestaurants,
+  deactivatePartnerRestaurant,
   createRestaurant,
-  editRestaurant,
+  editPartnerRestaurant,
   isRestaurantNameAvailable,
   uploadRestaurantProfilePhoto,
 
@@ -65,7 +69,6 @@ const {
 
   getRestaurantMenus,
   postRestaurantMenu,
-  postRestaurantPhoto,
   importRestaurants,
   updateAllRestaurants
 } = require("./APIs/partners");
@@ -78,11 +81,11 @@ const {
 const {
   getRestaurant,
   getRestaurants,
-  testFunction,
   getRestaurantDeal,
   getRestaurantDeals,
   getRestaurantGallery,
   searchRestaurants,
+  postRestaurantPhoto,
   editRestaurant: editRestaurantGeneral,
   createRestaurant: createRestaurantGeneral,
   deleteRestaurant: deleteRestaurantGeneral
@@ -103,7 +106,8 @@ const {
 } = require("./APIs/favorites");
 
 const { loginUser, logoutUser, resetPassword, verificateUserEmail } = require("./APIs/auth");
-const { setUserRole } = require("./APIs/admin");
+const { setUserRole, syncAuthToFirestoreUsers} = require("./APIs/admin");
+const dayjs = require("dayjs");
 
 
 app.post("/auth/login", loginUser);
@@ -119,31 +123,33 @@ app.get('/user/:userId', getUser);
 app.put("/user/:userId", editUser);
 app.delete("/user/:userId", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), deleteUser);
 app.get("/user/:userId/deals", getUserDeals);
-app.get("/user/:userId/restaurants", getUserRestaurants);
 app.get("/user/:email/available", isUsernameAvailable);
+app.get("/user/:userId/reservations", isAuthenticated, getUserReservations);
 
 // Reservations
 app.get("/reservations/:reservationId", isAuthenticated, getReservation);
 app.post("/reservations", isAuthenticated, createReservation);
 app.delete("/reservations/:reservationId", isAuthenticated, cancelReservation);
 
-app.get("/partner/restaurant", isAuthenticated, getPartnerRestaurant);
-app.put("/partner/restaurant", isAuthenticated, editRestaurant);
-app.get("/partner/deals", isAuthenticated, getDeals);
-app.get("/partner/deal/:dealId", isAuthenticated, getDeal);
-app.put("/partner/deal/:dealId", isAuthenticated, updateDeal);
-app.delete("/partner/deal/:dealId", isAuthenticated, deleteDeal);
-app.post("/partner/deal", isAuthenticated, createDeal);
-app.get("/partner/reservations", isAuthenticated, getReservationsList);
+app.get("/partner/restaurants", isAuthenticated, getPartnerRestaurants);
+app.get("/partner/restaurant/:restaurantId", isAuthenticated, getPartnerRestaurant);
+app.delete("/partner/restaurant/:restaurantId", isAuthenticated, deactivatePartnerRestaurant);
+app.put("/partner/restaurant/:restaurantId", isAuthenticated, editPartnerRestaurant);
+app.get("/partner/restaurant/:restaurantId/deals", isAuthenticated, getDeals);
+app.get("/partner/restaurant/:restaurantId/deal/:dealId", isAuthenticated, getDeal);
+app.put("/partner/restaurant/:restaurantId/deal/:dealId", isAuthenticated, updateDeal);
+app.delete("/partner/restaurant/:restaurantId/deal/:dealId", isAuthenticated, deleteDeal);
+app.post("/partner/restaurant/:restaurantId/deal", isAuthenticated, createDeal);
+app.get("/partner/restaurant/:restaurantId/reservations", isAuthenticated, getReservationsList);
 app.post("/partner/createQR", isAuthenticated, createQR);
 
 app.get("/categories", getCategories);
 app.post("/categories", isAuthenticated, createCategory);
 
-app.get("/restaurant/menus", isAuthenticated, getRestaurantMenus);
-app.post("/restaurant/menus", isAuthenticated, postRestaurantMenu);
-app.post("/restaurant/photos", isAuthenticated, postRestaurantPhoto);
-app.post("/restaurant/image", isAuthenticated, uploadRestaurantProfilePhoto);
+app.get("/partner/restaurant/:restaurantId/menus", isAuthenticated, getRestaurantMenus);
+app.post("/partner/restaurant/:restaurantId/menu", isAuthenticated, postRestaurantMenu);
+app.post("/partner/restaurant/:restaurantId/image", isAuthenticated, uploadRestaurantProfilePhoto);
+app.get("/partner/restaurant/:restaurantId/photos", getRestaurantGallery);
 app.post("/restaurant/create", isAuthenticated, createRestaurant);
 app.get(
   "/restaurant/:restaurantName/available-name",
@@ -159,6 +165,7 @@ app.put("/restaurant/:restaurantId", isAuthenticated, editRestaurantGeneral);
 app.get("/restaurant/:restaurantId/deals", getRestaurantDeals);
 app.get("/restaurant/:restaurantId/deals/:dealId", getRestaurantDeal);
 app.get("/restaurant/:restaurantId/photos", getRestaurantGallery);
+app.post("/restaurant/:restaurantId/photo", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), postRestaurantPhoto);
 
 // Deals
 app.post("/deals/redeem", isAuthenticated, redeemDeal);
@@ -174,6 +181,7 @@ app.post("/search/:indexName/query", searchRestaurants);
 
 // Admin
 app.post("/admin/setUserRole", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), setUserRole);
+app.post("/admin/syncAuthToFirestoreUsers", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.SUPER_ADMIN] }), syncAuthToFirestoreUsers);
 
 // Utils
 app.post("/import/restaurants", importRestaurants);
@@ -181,9 +189,8 @@ app.put("/update/restaurants", updateAllRestaurants);
 
 //
 const handleError = async (err, req, res) => {
-  //console.log(err);
-  return res.status(err.status).json({ ...err, error: err.message });
-  //res.status(400).send(err);
+  console.log(err);
+  return res.status(err.status).json({ ...err, message: err.message });
 }
 app.use(handleError);
 
@@ -211,32 +218,47 @@ exports.updateReservationStatus = functions.pubsub
 ////////////////////////////////////////
 // Restaurants Events
 //if(NODE_ENV == 'production'){
+  exports.onCreateUser = functions.auth
+    .user()
+    .onCreate(async (user) => {
+      await adminDb.collection('Users').doc(user.uid).set({
+        authId: user.uid,
+        email: user.email,
+        firstName: user.displayName,
+        lastName: user.displayName,
+        role: user.customClaims ? user.customClaims.role : USER_ROLES.CUSTOMER,
+        createdAt: dayjs().toDate(),
+        updatedAt: dayjs().toDate()
+      }).catch((err) => {
+        console.log(err);
+      })
+    });
   exports.onCreateRestaurant = functions.firestore
     .document("Restaurants/{restaurantId}")
     .onCreate(async (snap, context) => {
       const restaurant = snap.data();
-      const newRestaurant = {
-        objectID: snap.id,
-        ...restaurant,
-        createdAt: restaurant.createdAt._seconds,
-        _geoloc: {
-          lng: -99.174933,
-          lat: 19.408135,
-        },
-        deals: []
-      };
+      // const newRestaurant = {
+      //   objectID: snap.id,
+      //   ...restaurant,
+      //   createdAt: restaurant.createdAt._seconds,
+      //   _geoloc: {
+      //     lng: -99.174933,
+      //     lat: 19.408135,
+      //   },
+      //   deals: []
+      // };
 
       // Add or update new objects
-      algoliaIndex
-        .saveObject(newRestaurant)
-        .then(() => {
-          console.log("Documents imported into Algolia");
-          process.exit(0);
-        })
-        .catch((error) => {
-          console.error("Error when importing documents into Algolia", error);
-          process.exit(1);
-        });
+      // algoliaIndex
+      //   .saveObject(newRestaurant)
+      //   .then(() => {
+      //     console.log("Documents imported into Algolia");
+      //     process.exit(0);
+      //   })
+      //   .catch((error) => {
+      //     console.error("Error when importing documents into Algolia", error);
+      //     process.exit(1);
+      //   });
     });
 
   exports.onUpdateRestaurant = functions.firestore
@@ -246,42 +268,64 @@ exports.updateReservationStatus = functions.pubsub
       const hasPhoto = Boolean(restaurant.photo && restaurant.photo !== '');
       const hasAvatar = Boolean(restaurant.avatar && restaurant.avatar !== '');
 
-      /*--------------------- ALGOLIA ---------------------*/
+      // Verify that the restaurant is active.
+      // Otherwise, delete it from algolia index
+      if(!shouldPublishRestaurant(restaurant)){
+        await algoliaIndex.deleteObject(restaurant.id)
+          .then((response) => {
+            console.log("Document removed from Algolia", response);
+          })
+          .catch((error) => {
+            console.error("Error when deleting the document in Algolia", error);
+            process.exit(1);
+          });
+        
+        //
+        return process.exit(0);
+      }
+      
       // Verify if restaurant has active deals
       let hasDeals = false;
       const dealsList = await getDocs(query(
         collection(db, 'Deals'),
-        where('restaurantId', '==', snap.after.id),
+        where('restaurantId', '==', restaurant.id),
         where('status', '==', true)
       ));
       if(dealsList.size){
         hasDeals = true;
       }
 
+      // Geolocation
+      if(parseFloat(location.longitude) && parseFloat(location.latitude)){
+        restaurant._geoloc = {
+          lng: parseFloat(location.longitude),
+          lat: parseFloat(location.latitude)
+        }
+      }
+      
+      /*--------------------- ALGOLIA ---------------------*/
       // Create updated object
       const updatedRestaurant = {
-        objectID: snap.after.id,
         ...restaurant,
         createdAt: restaurant.createdAt._seconds,
         location,
-        _geoloc: {
-          lng: location.longitude,
-          lat: location.latitude,
-        },
         hasPhoto: hasPhoto,
         hasAvatar: hasAvatar,
-        hasDeals
+        hasDeals,
+        objectID: restaurant.id
       };
 
       // // Add or update new objects
       algoliaIndex
-        .partialUpdateObject(updatedRestaurant)
+        .partialUpdateObject(updatedRestaurant, {
+          createIfNotExists: true
+        })
         .then(() => {
-          console.log("Documents imported into Algolia");
+          console.log("Document updated in Algolia");
           process.exit(0);
         })
         .catch((error) => {
-          console.error("Error when importing documents into Algolia", error);
+          console.error("Error when updating the document in Algolia", error);
           process.exit(1);
         });
     });
@@ -326,7 +370,7 @@ exports.updateReservationStatus = functions.pubsub
       deals = [...deals, {
         ...deal,
         id: snap.id,
-        dealType: deal.dealType == 1 ? 'discount' : 'promotion'
+        dealType: deal.dealType
       }];
 
       // create deal object
@@ -355,6 +399,7 @@ exports.updateReservationStatus = functions.pubsub
       const deal = snap.after.data();
 
       // Cancel all reservations linked to the deal
+      /*
       if(!deal.active){
         const reservationsCollection = query(
           collection(db, 'Reservations'),
@@ -384,14 +429,14 @@ exports.updateReservationStatus = functions.pubsub
         deals = [...restaurant.deals]
       }
 
-      // verify if deal is active
+      // verify if deals is active
       if(!deal.active){
         deals = deals.filter((item) => item.id != snap.after.id)
       } else {
         deals = [...deals, {
           id: snap.after.id, 
           ...deal,
-          dealType: deal.dealType == 1 ? 'discount' : 'promotion'
+          dealType: deal.dealType
         }];
       }
       
@@ -421,7 +466,7 @@ exports.updateReservationStatus = functions.pubsub
       const deal = snap.data();
 
       // Cancel all reservations linked to the deal
-      const reservationsCollection = query(
+      /* const reservationsCollection = query(
         collection(db, 'Reservations'),
         where('dealId', '==', snap.id),
         where('active', '==', true)
@@ -436,7 +481,7 @@ exports.updateReservationStatus = functions.pubsub
             status: RESERVATION_STATUS.DEAL_CANCELED
           })
         }
-      }
+      } */
 
       // Get current indexed deals
       const restaurant = await algoliaIndex.getObject(deal.restaurantId, {
