@@ -35,14 +35,26 @@ exports.loginUser = async (request, response) => {
     await setPersistence(auth, 'NONE');
     const userAuth = await signInWithEmailAndPassword(auth, userCredentials.email, userCredentials.password)
         .catch((error) => {
-            //console.error(error);
-            throw new CustomError({ status: 403, message: 'Wrong credentials, please try again' });
+            console.error(error);
+            return response.status(403).json({
+                err: error
+            });
         })
-    
-    await signOut(auth);
+    //console.loh(userAuth)
+    await signOut(auth).catch((error) => {
+        console.error(error);
+        return response.status(403).json({
+            err: error
+        });
+    });
 
     // Sign in user again, but with custom token
-    const data = await signIn(userAuth.user.uid)
+    const data = await signIn(userAuth.user.uid).catch((error) => {
+        console.error(error);
+        return response.status(403).json({
+            err: error
+        });
+    })
     return response.json(data);
 };
 
@@ -50,7 +62,7 @@ exports.logoutUser = async (request, response) => {
     await signOut(auth)
         .catch((error) => {
             console.error(error);
-            return response.status(403).json({ general: 'Error closing session, please try again' });
+            return response.status(403).json({ ...error, message: 'Error intentando cerrar la sesión.' });
         });
 
     //
@@ -64,7 +76,7 @@ exports.resetPassword = async (request, response) => {
         return response.json({message: 'success'});
     }).catch((error) => {
         console.error(error);
-        return response.status(403).json({ general: 'Error sending password rest email.' });
+        return response.status(403).json({ ...error, message: 'No se encontró un usuario con este email.' });
     });
 };
 
@@ -73,7 +85,7 @@ exports.verificateUserEmail = async (request, response) => {
         emailVerified: true
     }).catch((error) => {
         console.error(error);
-        return response.status(403).json({ general: 'Error verifying user.' });
+        return response.status(403).json({ ...error, message: 'Error verificando al usuario.' });
     });
     
     //

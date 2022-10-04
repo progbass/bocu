@@ -19,7 +19,7 @@ module.exports = async (request, response) => {
     // Verify that token is present
 	if (!request.headers.authorization && !request.headers.authorization.startsWith('Bearer ')) {
 		console.error('No token found');
-		return response.status(403).json({ error: 'Unauthorized' });
+		return response.status(403).json({ message: 'Usuario no autorizado.' });
 	}
 	
 	// Get token

@@ -5,8 +5,6 @@ const { USER_ROLES } = require('./app-config');
 const { CustomError } = require('./CustomError');
 
 exports.isAuthenticated = async (request, response, next) => {
-	
-
 	// Verify that token is present
 	if (!request.headers.authorization || !request.headers.authorization.startsWith('Bearer ')) {
 		console.error('No token found');
@@ -16,6 +14,7 @@ exports.isAuthenticated = async (request, response, next) => {
 	//const userToken = await userData.user.getIdToken();
 	const idToken = request.headers.authorization.split('Bearer ')[1];
 
+	//
 	try {
 		request.user = await getCurrentUser(auth, idToken);
 		return next();
@@ -24,49 +23,6 @@ exports.isAuthenticated = async (request, response, next) => {
 		console.error(`${err.code} -  ${err.message}`)
 		return next(new CustomError({message: 'Unauthorized', status: 403}));
 	}
-
-	/*
-	let userLoaded =  false;
-	await onAuthStateChanged(auth, async userToken => {
-		if (userToken && !userLoaded) {
-			userLoaded = true;
-
-			// Get user data
-			const userData = await formatUserData(userToken.uid);
-			request.user = {
-				...userToken,
-				...userData
-			} 
-			
-			//
-			next();
-		} else if(!userLoaded) {
-			userLoaded = true;
-
-			// Try to login with the custom access token
-			await signInWithCustomToken(auth, idToken)
-				.then(async userToken => {
-					//request.user = userToken.user;
-
-					// Get user data
-					const userData = await formatUserData(userToken.user.uid);
-					request.user = {
-						...userToken.user,
-						...userData
-					} 
-
-					//
-					next();
-				})
-				.catch(err =>{
-					// User is signed out
-					console.error(err);
-					return response.status(403).json({ error: 'User not logged in.' });
-				})
-		}
-	});
-    //
-	*/
 };
 
 exports.isAuthorizated = (opts = { hasRole: [], allowSameUser: true }) => {
