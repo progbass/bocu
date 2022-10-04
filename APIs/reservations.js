@@ -11,14 +11,11 @@ const {
     limit,
     orderBy
 } = require('firebase/firestore');
-const { db, app } = require('../utils/admin');
-const { isDealActive, isDealValid } = require('../utils/deals-utils');
+const functions = require("firebase-functions");
+const { db, adminDb } = require('../utils/admin');
+const { isDealActive, isDealValid, doesDealHasRedemptionUsage } = require('../utils/deals-utils');
 const { RESERVATION_STATUS } = require('../utils/reservations-utils');
 const dayjs = require('dayjs');
-
-
-// Config.
-const UTC_OFFSET = -5;
 
 // Methods
 exports.createReservation = async (request, response) => {
@@ -32,8 +29,8 @@ exports.createReservation = async (request, response) => {
             customerId: request.user.uid,
             dealId: request.body.dealId,
             restaurantId: request.body.restaurantId,
-            reservationDate: Timestamp.fromDate(dayjs(request.body.reservationDate).toDate()),
-            createdAt: Timestamp.fromDate(dayjs().toDate()),
+            reservationDate: dayjs(request.body.reservationDate).toDate(),
+            createdAt: dayjs().toDate(),
             cancelledAt: null,
         };
 
@@ -53,56 +50,57 @@ exports.createReservation = async (request, response) => {
         // No more than 1 reservation for the same deal per user.
         if(userReservations.size > 0){
             return response.status(400).json({
-                message: 'You already have a reservation for this deal.'
+                message: 'Ya cuentas con una reservación para esta oferta.'
             })
         }
 
         // Dont allow reservations on past dates.
-        if(dayjs(newReservation.reservationDate.toDate()).isBefore(dayjs())){
+        if(dayjs(newReservation.reservationDate).isBefore(dayjs())){
             return response.status(400).json({
-                message: 'Cannot create reservations for a past date.'
+                message: 'Imposible crear reservaciones para una fecha pasada.'
             })
         }
 
         // Get related deal
+        const dealPath = `Deals/${request.body.dealId}`;
         const dealRef = doc(db, `Deals/`, request.body.dealId);
         let deal = await getDoc(dealRef);
         if(!deal.exists()){
             return response.status(400).json({
-                message: 'Deal not found.'
+                message: 'Oferta no encontrada.'
             }) 
         }
         if(!isDealValid(deal.data())){
             return response.status(400).json({
-                error: 'Deal is invalid.'
+                message: 'Oferta inválida.'
             }) 
         }
         if(!isDealActive(deal.data())){
-            if(deal.get('useCount') >= deal.get('useMax')){
-                await updateDoc(dealRef, {active: false});
+            if(!doesDealHasRedemptionUsage(deal.data())){
+                await adminDb.doc(dealPath).update({active: false});
     
                 return response.status(400).json({
-                    error: 'Number of reservations exceeded.'
+                    message: 'Número de ofertas agotado.'
                 }) 
             }
             
             return response.status(400).json({
-                error: 'Deal has been deactivated.'
+                message: 'La oferta ha sido desactivada.'
             }) 
         }
-        if(dayjs(newReservation.reservationDate.toDate()).isAfter(deal.get('expiresAt').toDate())){
+        if(dayjs(newReservation.reservationDate).isAfter(deal.get('expiresAt').toDate())){
             return response.status(400).json({
-                error: 'Cannot make a reservation after deal expires.'
+                message: 'No se puede realizar una reservación. La oferta ha expirado.'
             }) 
         }
 
         // Update deal use count
-        await updateDoc(dealRef, {useCount: deal.get('useCount')+1});
+        await adminDb.doc(dealPath).update({useCount: deal.get('useCount')+1});
         deal = await getDoc(dealRef);
 
         // Validate max use count and deactivate deal if necessary
-        if(deal.get('useCount') >= deal.get('useMax')){
-            await updateDoc(dealRef, {active: false});
+        if(!doesDealHasRedemptionUsage(deal.data())){
+            await adminDb.doc(dealPath).update({active: false});
         }
 
         // Add new reservation
@@ -118,37 +116,38 @@ exports.createReservation = async (request, response) => {
         })
     } catch (err){
         console.log(err)
-        return response.status(500).json({ error: err })
+        return response.status(500).json({ ...err, message: 'Error al crear la reservación.' })
     }
 }
 exports.cancelReservation = async (request, response) => {
     try {
-        // Get reservation
+        // Update and retrieve reservation
         const reservationRef = doc(db, `Reservations`, request.params.reservationId);
         await updateDoc(reservationRef, {
             status: RESERVATION_STATUS.USER_CANCELED, 
             active: false,
-            cancelledAt: Timestamp.fromDate(new Date())
+            cancelledAt: dayjs().toDate()
         });
         const reservation = await getDoc(reservationRef);
 
         if(!reservation.exists()){
             return response.status(400).json({
-                error: 'Reservation not found.'
+                message: 'Reservación no encontrada.'
             }) 
         }
 
         // Update deal use count
-        const dealRef = doc(db, `Deals`, reservation.get('dealId'));
-        const deal = await getDoc(dealRef);
+        const dealRef = adminDb.doc(`Deals/${reservation.get('dealId')}`);
+        const deal = await dealRef.get();
         let useCount = deal.get('useCount')-1;
         useCount = useCount > 0 ? useCount : 0;
-        await updateDoc(dealRef, {useCount})
+        await dealRef.update({useCount})
 
         // Send confirmation to user
         return response.status(200).json({ ...reservation.data(), id: reservation.id })
     } catch (err){
-        return response.status(500).json({ error: err })
+        functions.logger.error(err);
+        return response.status(500).json({ ...err, message: 'Error al cancelar la reservación.' })
     }
 }
 exports.getReservation = async (request, response) => {
@@ -158,21 +157,31 @@ exports.getReservation = async (request, response) => {
         ).catch((err) => {
             console.error(err);
             return response.status(500).json({
-                error: err.code
+                ...err,
+                message: 'Error al obtener la reservación.'
             });
         });
 
         // Get User
-        //const customerSnap = await adminAuth.getUser(document.data().customerId);
-        const customer = request.user; //customerSnap.toJSON();
+        const customer = await getDoc(doc(db, `Users/${document.get('customerId')}`));
+        if(!customer.exists){
+            return response.status(400).json({
+                message: 'Cliente no encontrado.'
+            })
+        }
         
         // Return reservation document
         return response.status(200).json({
             ...document.data(),
             id: document.id,
-            customer: customer.email
+            customer: customer.get('email'),
+            createdAt: document.get('createdAt').toDate(),
+            reservationDate: document.get('reservationDate').toDate(),
+            cancelledAt: document.get('cancelledAt') ? document.get('cancelledAt').toDate() : null,
+            checkIn: document.get('checkIn') ? document.get('checkIn').toDate() : null,
         });
     } catch (err){
-        return response.status(500).json({ error: err })
+        functions.logger.error(err);
+        return response.status(500).json({ ...err, message: 'Error al obtener la reservación.' })
     }
 }
