@@ -5,7 +5,7 @@ const {
     getDocs, 
     query, 
 } = require('firebase/firestore'); 
-const slugify = require("slugify");
+const { slugifyString } = require("../utils/formatters");
 const dayjs = require("dayjs");
 var utc = require("dayjs/plugin/utc");
 var timezone = require("dayjs/plugin/timezone");
@@ -24,7 +24,7 @@ exports.createCategory = async (request, response) => {
         thumbnail: request.body.thumbnail || "",
         thumbnail_on: request.body.thumbnail || "",
         name: request.body.name || "",
-        slug: slugify(request.body.name.toLowerCase()) || "",
+        slug: slugifyString(request.body.name) || "",
     };
 
     // Insert Category
@@ -33,7 +33,7 @@ exports.createCategory = async (request, response) => {
         newCategoryItem
     ).catch((err) => {
       console.error(err);
-      return response.status(500).json({ error: err.code });
+      return response.status(500).json({ ...err, message: 'Error al crear la categoría.' });
     });
 
     //
@@ -50,7 +50,8 @@ exports.getCategories = async (request, response) => {
         collection(db, `Categories`)
     )).catch((err) => {
       return response.status(500).json({
-        error: err.code,
+        ...err,
+        message: 'Error al obtener las categorías.',
       });
     });
 
@@ -66,7 +67,7 @@ exports.getCategories = async (request, response) => {
         return response.json(categories);
     } else {
         return response.status(204).json({
-            error: "No categories were found.",
+            message: "No se encontraron categorías.",
         });
     }
 };
