@@ -40,3 +40,40 @@ exports.isReservationValid = async(reservation) => {
         });
       }
 }
+
+exports.getReservationStatusDetails = (reservationId) => {
+  let statusDetails;
+  switch (reservationId) {
+    case 1:
+      statusDetails = "Reservación activa";
+      break;
+    case 2:
+      statusDetails = "Reservación cancelada por el usuario";
+      break;
+    case 3:
+      statusDetails = "Reservación en tiempo de tolerancia";
+      break;
+    case 4:
+      statusDetails = "Reservación expirada";
+      break;
+    case 5:
+      statusDetails = "Reservación completada";
+      break;
+    case 6:
+      statusDetails = "Reservación cancelada por el restaurante";
+      break;
+    case 7:
+      statusDetails = "Error con la reservación";
+      break;
+    case 8:
+      statusDetails = "Oferta expirada";
+      break;
+    case 9:
+      statusDetails = "Oferta cancelada";
+      break;
+    default:
+      statusDetails = "Status de la reservación no definido";
+  }
+
+  return statusDetails;
+}

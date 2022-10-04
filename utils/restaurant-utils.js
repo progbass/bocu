@@ -1,6 +1,17 @@
+const dayjs = require("dayjs");
 const { validateAddress, validateName, validatePhone } = require('./validators');
+const { slugifyString } = require("./formatters");
 
 
+const shouldPublishRestaurant = (restaurant) => {
+  if(!restaurant.active || !restaurant.isApproved){
+    return false;
+  }
+  return true;
+}
+exports.shouldPublishRestaurant = shouldPublishRestaurant;
+
+//
 const getMissingRequirements = (restaurant) => {
     const requiredValidations = [{
       operation: validateAddress,
@@ -36,11 +47,13 @@ const getMissingRequirements = (restaurant) => {
 }
 exports.getMissingRequirements = getMissingRequirements;
 
+//
 const hasMissingRequirements = (restaurant) => {
     return getMissingRequirements(restaurant).length > 0;
 }
 exports.hasMissingRequirements = hasMissingRequirements;
 
+//
 exports.generateQR = async (restaurantId, bucket) => {
   const { uploadString } = require("firebase/storage");
   //const stg = ref(storage);
@@ -68,6 +81,8 @@ exports.generateQR = async (restaurantId, bucket) => {
   //upload.ref.bucket.ge
   //return file.publicUrl();
 };
+
+//
 const base64MimeType = (encoded) => {
   var result = null;
 
@@ -83,3 +98,81 @@ const base64MimeType = (encoded) => {
 
   return result;
 };
+
+//
+const getNewRestaurantObject = (restaurantName, userEmail, userId, restaurantProps = {}) => {
+  return {
+    categories: [],
+    qrCode: "",
+    photo: "",
+    avatar: "",
+    rating: 0,
+    location: {},
+    address: "",
+    phone: "",
+    description: "",
+    instagram: "",
+
+    ...restaurantProps,
+    name: restaurantName,
+    slug: slugifyString(restaurantName),
+    active: true,
+    isApproved: false,
+    hasMinimumRequirements: false,
+    email: userEmail,
+    userId: userId,
+    createdAt: dayjs().toDate(),
+    schedules: [
+      {
+        dayName: "Lu",
+        daySlug: "monday",
+        closesAt: "22:00",
+        opensAt: "10:00",
+        active: true,
+      },
+      {
+        dayName: "Ma",
+        daySlug: "tuesday",
+        closesAt: "22:00",
+        opensAt: "10:00",
+        active: true,
+      },
+      {
+        dayName: "Mi",
+        daySlug: "wednesday",
+        closesAt: "22:00",
+        opensAt: "10:00",
+        active: true,
+      },
+      {
+        dayName: "Ju",
+        daySlug: "thursday",
+        closesAt: "22:00",
+        opensAt: "10:00",
+        active: true,
+      },
+      {
+        dayName: "Vi",
+        daySlug: "friday",
+        closesAt: "22:00",
+        opensAt: "10:00",
+        active: true,
+      },
+      {
+        dayName: "Sa",
+        daySlug: "saturday",
+        closesAt: "20:00",
+        opensAt: "10:00",
+        active: true,
+      },
+      {
+        dayName: "Do",
+        daySlug: "sunday",
+        closesAt: "20:00",
+        opensAt: "10:00",
+        active: true,
+      },
+    ],
+  }
+}
+exports.getNewRestaurantObject = getNewRestaurantObject;
