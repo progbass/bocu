@@ -1,3 +1,4 @@
+const functions = require("firebase-functions");
 const {
   doc,
   addDoc,
@@ -12,9 +13,9 @@ const {
   Timestamp,
   where,
 } = require("firebase/firestore");
-const { db } = require("../utils/admin");
+const { db, adminDb, admin } = require("../utils/admin");
 const { HUMAN_READABLE_DATE_FORMAT } = require("../utils/app-config");
-const { isDealValid } = require("../utils/deals-utils");
+const { isDealValid, doesDealHasRedemptionUsage } = require("../utils/deals-utils");
 const {
   RESERVATION_STATUS,
   RESERVATION_TOLERANCE_MINUTES,
@@ -32,33 +33,41 @@ exports.redeemDeal = async (request, response) => {
     let deal = await getDoc(dealRef);
     if (!deal.exists()) {
       return response.status(400).json({
-        message: "Deal does not exists.",
+        message: "La oferta no existe.",
       });
     }
 
     // Validate that deal is linked to a restaurant
     if (!isDealValid(deal.data())) {
       return response.status(400).json({
-        message: `This deal is not valid.`,
+        message: `La oferta no es válida.`,
       });
     }
 
     // // Validate that deal is active
     if (!deal.get("active")) {
+      // TODO: Today the deal can 'active' = true||false.
+      // It may be better to link this property to a 'status' catalog so we can have more granular monitor of the deal's state.
+      // Eg. 'active', 'inactive', 'canceled', 'redemptionCountFull' or 'expired'.
+      
+      // If restaurants cancel a deal, user's reservations whould not be affected,
+      // and deals must continue to be redeemable.
+      // That's why, when a deal's status is set to inactive,
+      // we are only checking if the deal redemption count is valid .
+
       // Validate deal does not exceed number of uses
-      if (deal.get("useCount") >= deal.get("useMax")) {
-        await updateDoc(deal.ref, { active: false });
+      if (!doesDealHasRedemptionUsage(deal.data())) {
+        await adminDb.doc(`Deals/${deal.id}`).update({active: false});
         return response.status(400).json({
-          message: `Sorry. This deal exceeds the ${deal.get(
+          message: `La oferta excede el número de redenciones ${deal.get(
             "useMax"
-          )} maximum redemption limit.`,
+          )}.`,
         });
       }
 
-      //
-      return response.status(400).json({
-        message: `Deal has been deactivated by restaurant or admin.`,
-      });
+      // return response.status(400).json({
+      //   message: `Deal has been deactivated by restaurant or admin.`,
+      // });
     }
 
     // Validate that deal hasn't expired yet
@@ -93,7 +102,7 @@ exports.redeemDeal = async (request, response) => {
     // Verificar que la reservación exista.
     if (!reservations.size) {
       return response.status(400).json({
-        message: "No reservations linked to this deal.",
+        message: "No hay reservaciones vinculadas con esta oferta.",
       });
     }
 
@@ -103,14 +112,14 @@ exports.redeemDeal = async (request, response) => {
     // Verificar que la reservacion no haya sido concluída
     await isReservationActive(reservation.data()).catch((err) => {
       return response.status(400).json({
-        message: "Reservation was already redeemed or was canceled.",
+        message: "La reservación fue finalizada o cancelada.",
       });
     });
 
     // Verify if deal is active
     if (!reservation.get("active")) {
       return response.status(400).json({
-        message: "The reservation is not active anymore.",
+        message: "Reservación no activa.",
       });
     }
 
@@ -124,24 +133,29 @@ exports.redeemDeal = async (request, response) => {
     );
     if (dayjs(NOW).isAfter(dayjs(reservationExpirationWithTolerance))) {
       return response.status(400).json({
-        message: `Reservation expired at ${dayjs(reservationExpiryDate).format(
+        message: `La reservación expiró el ${dayjs(reservationExpiryDate).format(
           HUMAN_READABLE_DATE_FORMAT
         )}.`,
       });
     }
 
     // Concluír la reservación (cambio de status)
-    await updateDoc(reservation.ref, {
+    await adminDb.doc(`Reservations/${reservation.id}`).update({
       status: RESERVATION_STATUS.COMPLETED,
       active: false,
-      checkIn: Timestamp.fromDate(dayjs().toDate()),
+      checkIn: dayjs().toDate(),
+    }).catch((err) => {
+      console.log('err')
+      return response.status(500).json({
+        message: err,
+      });
     });
     reservation = await getDoc(reservation.ref);
 
     // Create redemption registry
     const redemptionCollection = collection(db, "DealRedemptions");
-    await addDoc(redemptionCollection, {
-      createdAt: Timestamp.fromDate(dayjs().toDate()),
+    await adminDb.collection("DealRedemptions").add({
+      createdAt: dayjs().toDate(),
       customerId: request.user.uid,
       dealId: deal.id,
     }).catch((err) => {
@@ -156,12 +170,26 @@ exports.redeemDeal = async (request, response) => {
     );
 
     // Update deal use count
-    await updateDoc(dealRef, { useCount: redemptionCount.size });
+    await adminDb.doc(`Deals/${deal.id}`)
+      .update({ useCount: redemptionCount.size })
+      .catch((err) => {
+        functions.logger.error(err);
+        return response.status(500).json({
+          message: err,
+        });
+      })
     deal = await getDoc(dealRef);
 
     // Re-validate maximum use count.
-    if (deal.get("useCount") >= deal.get("useMax")) {
-      await updateDoc(deal.ref, { active: false });
+    if (!doesDealHasRedemptionUsage(deal.data())) {
+      await adminDb.doc(`Deals/${deal.id}`)
+        .update({active: false})
+        .catch((err) => {
+          functions.logger.error(err);
+          return response.status(500).json({
+            message: err,
+          });
+        });
     }
 
     // Enviar notificación al restaurante.
@@ -195,99 +223,119 @@ exports.findDeal = async (request, response) => {
   // Validate that there are any reservations
   if (!reservations.length) {
     return response.status(204).json({
-      message: "No active reservations found.",
+      message: "No se encontraron reservaciones activas.",
     });
   }
 
   // Get first reservation document
-  let reservation = reservations[0];
+  let dealFound;
+  for(const reservation of reservations){
 
-  // Validate reservation status
-  if (
-    reservation.get("status") == RESERVATION_STATUS.RESERVATION_EXPIRED ||
-    reservation.get("status") == RESERVATION_STATUS.COMPLETED ||
-    reservation.get("status") == RESERVATION_STATUS.USER_CANCELED ||
-    reservation.get("status") == RESERVATION_STATUS.RESTAURANT_CANCELED
-  ) {
-    return response.status(400).json({
-      message: "Reservation was already redeemed or canceled.",
-    });
-  }
-
-  // Validate that reservation is active (by admin or restaurant)
-  if (reservation.get("active") != true) {
-    return response.status(400).json({
-      message: "Reservation has been deactivated by the admin.",
-    });
-  }
-
-  // Validate reservation date hasnt expired.
-  const NOW = Timestamp.now().toDate();
-  const reservationExpiryDate = dayjs(
-    reservation.get("reservationDate").toDate()
-  );
-  const reservationExpirationWithTolerance = dayjs(reservationExpiryDate).add(
-    RESERVATION_TOLERANCE_MINUTES,
-    "minute"
-  );
-  if (dayjs(NOW).isAfter(dayjs(reservationExpirationWithTolerance))) {
-    return response.status(400).json({
-      message: `Reservation expired at ${dayjs(reservationExpiryDate).format(
-        HUMAN_READABLE_DATE_FORMAT
-      )}.`,
-    });
-  }
-
-  // Encontrar el deal vinculado a esa reservación
-  const dealRef = doc(db, `Deals`, reservation.get("dealId"));
-  let deal = await getDoc(dealRef);
-  if (!deal.exists()) {
-    return response.status(400).json({
-      message: `Deal does not exists.`,
-    });
-  }
-
-  // Validate that deal is linked to a restaurant
-  if (!isDealValid(deal.data())) {
-    return response.status(400).json({
-      message: `The deal related to your reservation is not valid.`,
-    });
-  }
-
-  // Validate that deal is active
-  if (!deal.get("active")) {
-    // Validate deal does not exceed number of uses
-    if (deal.get("useCount") >= deal.get("useMax")) {
-      await updateDoc(deal.ref, { active: false });
+    // Validate reservation status
+    if (
+      reservation.get("status") == RESERVATION_STATUS.RESERVATION_EXPIRED ||
+      reservation.get("status") == RESERVATION_STATUS.COMPLETED ||
+      reservation.get("status") == RESERVATION_STATUS.USER_CANCELED ||
+      reservation.get("status") == RESERVATION_STATUS.RESTAURANT_CANCELED
+    ) {
       return response.status(400).json({
-        message: `This deal exceeds the ${deal.get(
-          "useMax"
-        )} maximum redemption limit.`,
+        message: "La reservación fue finalizada o cancelada.",
       });
     }
 
+    // Validate that reservation is active (by admin or restaurant)
+    if (reservation.get("active") != true) {
+      return response.status(400).json({
+        message: "Reservación no activa.",
+      });
+    }
+
+    // Validate reservation date hasnt expired.
+    const NOW = Timestamp.now().toDate();
+    const reservationExpiryDate = dayjs(
+      reservation.get("reservationDate").toDate()
+    );
+    const reservationExpirationWithTolerance = dayjs(reservationExpiryDate).add(
+      RESERVATION_TOLERANCE_MINUTES,
+      "minute"
+    );
+
+    if (dayjs(NOW).isAfter(dayjs(reservationExpirationWithTolerance))) {
+      return response.status(400).json({
+        message: `La reservación expiró el ${dayjs(reservationExpiryDate).format(
+          HUMAN_READABLE_DATE_FORMAT
+        )}.`,
+      });
+    }
+
+    // Encontrar el deal vinculado a esa reservación
+    const dealRef = doc(db, `Deals`, reservation.get("dealId"));
+    let deal = await getDoc(dealRef);
+    if (!deal.exists()) {
+      continue
+      // return response.status(400).json({
+      //   message: `Deal does not exists.`,
+      // });
+    }
+
+    // Validate that deal is linked to a restaurant
+    if (!isDealValid(deal.data())) {
+      return response.status(400).json({
+        message: `La oferta vinculada con tu reservación no es válida.`,
+      });
+    }
+
+    // Validate that deal is active
+    if (!deal.get("active")) {
+      // Validate deal does not exceed number of uses
+      if (!doesDealHasRedemptionUsage(deal.data())){
+        await adminDb.doc(`Deals/${deal.id}`).update({active: false});
+        return response.status(400).json({
+          message: `La oferta excede el número de redenciones ${deal.get(
+            "useMax"
+          )}.`,
+        });
+      }
+
+      //
+      // return response.status(400).json({
+      //   message: `Deal has been deactivated by restaurant or admin.`,
+      // });
+    }
+
+    // Validate that deal hasn't expired yet
+    const dealExpirationDate = deal.get("expiresAt").toDate();
+    const dealExpirationWithTolerance = dayjs(dealExpirationDate).add(
+      RESERVATION_TOLERANCE_MINUTES,
+      "minute"
+    );
+    if (dayjs(NOW).isAfter(dealExpirationWithTolerance)) {
+      return response.status(400).json({
+        message: `La oferta expiró el ${dayjs(dealExpirationDate).format(
+          HUMAN_READABLE_DATE_FORMAT
+        )}.`,
+      });
+    }
+    
     //
-    return response.status(400).json({
-      message: `Deal has been deactivated by restaurant or admin.`,
-    });
+    dealFound = deal;
+    break;
   }
 
-  // Validate that deal hasn't expired yet
-  const dealExpirationDate = deal.get("expiresAt").toDate();
-  const dealExpirationWithTolerance = dayjs(dealExpirationDate).add(
-    RESERVATION_TOLERANCE_MINUTES,
-    "minute"
-  );
-  if (dayjs(NOW).isAfter(dealExpirationWithTolerance)) {
+  if(!dealFound){
     return response.status(400).json({
-      message: `Deal expired at ${dayjs(dealExpirationDate).format(
-        HUMAN_READABLE_DATE_FORMAT
-      )}.`,
-    });
+        message: `La oferta no existe.`,
+      });
   }
 
   // Enviar el más reciente deal encontrado
-  return response.status(200).json({ ...deal.data(), id: deal.id });
+  return response.status(200).json({ 
+    ...dealFound.data(), 
+    id: dealFound.id,
+    createdAt: dealFound.get("createdAt").toDate(),
+    expiresAt: dealFound.get("expiresAt").toDate(),
+    startsAt: dealFound.get("startsAt").toDate(),
+  });
 };
 exports.deleteAllDeals = async (request, response) => {
   try {
