@@ -1,10 +1,10 @@
 // Application Configuration
 exports.MAX_CATEGORIES = 2;
-exports.MAX_RESTAURANTS_PER_USER = 1;
+exports.MAX_RESTAURANTS_PER_USER = 20;
 exports.USER_ROLES = {
     ADMIN: 'admin',
     SUPER_ADMIN: 'super_admin',
-    CUTOMER: 'customer',
+    CUSTOMER: 'customer',
     PARTNER: 'partner'
 }
 exports.SEARCH_CONFIG = {
