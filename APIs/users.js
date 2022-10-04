@@ -19,7 +19,7 @@ const {
   Timestamp,
 } = require("firebase/firestore");
 const dayjs = require("dayjs");
-const { user } = require("firebase-functions/v1/auth");
+const { getReservationStatusDetails, RESERVATION_STATUS } = require("../utils/reservations-utils");
 const { USER_ROLES, LISTING_CONFIG } = require("../utils/app-config");
 const { signIn } = require("./auth");
 
@@ -29,7 +29,7 @@ function handleError(res, err) {
 
 exports.createUser = async (req, res) => {
   try {
-    const { password, email, role = USER_ROLES.CUTOMER } = req.body;
+    const { password, email, role = USER_ROLES.CUSTOMER } = req.body;
 
     if (!password || !email || !role) {
       return res.status(400).send({ message: "Missing fields" });
@@ -81,7 +81,7 @@ exports.getCurrentUser = async (request, response) => {
 };
 exports.getUser = async (request, response) => {
   const user = await adminAuth.getUser(request.params.userId).catch((err) => {
-    return response.status(404).json({ error: "User not found" });
+    return response.status(404).json({ ...err, message: "No se encontró el usuario." });
   });
   //
   if (user) {
@@ -93,7 +93,7 @@ exports.getUser = async (request, response) => {
     return response.json({ ...user.toJSON(), ...userNode });
   }
   //
-  return response.status(404).json({ error: "User not found" });
+  return response.status(404).json({ message: "No se encontró el usuario." });
 };
 exports.editUser = async (request, response) => {
   const user = await adminAuth
@@ -101,7 +101,7 @@ exports.editUser = async (request, response) => {
       ...request.body,
     })
     .catch((err) => {
-      return response.status(404).json({ error: "User not found" });
+      return response.status(404).json({ ...err, message: "Ocurrió un error alactualizar el usuario." });
     });
 
   //
@@ -114,7 +114,7 @@ exports.editUser = async (request, response) => {
     return response.json({ ...user.toJSON(), ...userNode });
   }
   //
-  return response.status(404).json({ error: "User not found" });
+  return response.status(404).json({ message: "No se encontró el usuario." });
 
   // updateDoc(
   // 	doc(db, `/Users/`, request.params.userId),
@@ -139,7 +139,8 @@ exports.getUsers = async (request, response) => {
   ).catch((err) => {
     console.error(err);
     return response.status(500).json({
-      error: err.code,
+      ...err,
+      message: 'Ocurrió un error al obtener los usuarios.',
     });
   });
 
@@ -175,9 +176,7 @@ exports.getUsers = async (request, response) => {
 
     return response.json(users);
   } else {
-    return response.status(204).json({
-      error: "No restaurants were found.",
-    });
+    return response.status(204).json([]);
   }
 };
 exports.deleteUser = async (request, response) => {
@@ -188,7 +187,8 @@ exports.deleteUser = async (request, response) => {
   // Remove user from firestore
   await deleteDoc(userDoc).catch((err) => {
     return response.status(500).json({
-      error: err.code,
+      ...err,
+      message: 'Ocurrió un error al eliminar el usuario.',
     });
   });
 
@@ -228,32 +228,166 @@ exports.getUserDeals = (request, response) => {
     })
     .catch((err) => {
       console.error(err);
-      return response.status(500).json({ error: err.code });
+      return response.status(500).json({ ...err, message: 'Ocurrió un error al obtener las ofertas.' });
     });
 };
-exports.getUserRestaurants = (request, response) => {
-  getDocs(
-    query(
-      collection(db, "Restaurants"),
-      where("userId", "==", request.params.userId),
-      limit(LISTING_CONFIG.MAX_LIMIT)
-    )
-  )
-    .then((data) => {
-      let restaurants = [];
-      data.forEach((doc) => {
-        restaurants.push({
-          id: doc.id,
-          ...doc.data(),
+// 
+exports.getUserReservations = async (request, response) => {
+  const filtersList = [
+    where("customerId", "==", request.user.uid)
+  ];
+
+  // Filter by 'active' state (true by default)
+  if(request.query.active && request.query.active != ''){
+    let filterByActive = request.query?.active && request.query?.active == 'false' ? false : true;
+    filtersList.push(where("active", "==", filterByActive));
+  }
+
+  // Filter by date range
+  let range_init = request.query.range_init;
+  if (range_init && range_init != '') {
+    if(dayjs(request.query.range_init).isValid()){
+    range_init = dayjs(dayjs(request.query.range_init).toISOString())
+      //.utcOffset(UTC_OFFSET, true)
+      .toDate()
+
+      filtersList.push(where(
+        "reservationDate",
+        ">=",
+        Timestamp.fromDate(range_init)
+      ))
+    }
+  }
+  let range_end = request.query.range_end;
+  if (range_end && range_end != '') {
+    if(dayjs(request.query.range_end).isValid()){
+      range_end = dayjs(request.query.range_end)
+        .hour(23)
+        .minute(59)
+        .second(59)
+        //.utcOffset(UTC_OFFSET, true)
+        .toDate()
+    
+      filtersList.push(where(
+        "reservationDate", 
+        "<=", 
+        Timestamp.fromDate(range_end)
+      ))
+    }
+  }
+
+  // Filtery by status
+  let statusCode = undefined;
+  let status = request.query?.status || undefined;
+  if (status) {
+    switch (status) {
+      case "canceled":
+        statusCode = RESERVATION_STATUS.USER_CANCELED;
+        break;
+      case "tolerance":
+        statusCode = RESERVATION_STATUS.TOLERANCE_TIME;
+        break;
+      case "expired":
+        statusCode = RESERVATION_STATUS.RESERVATION_EXPIRED;
+        break;
+      case "fulfilled":
+        statusCode = RESERVATION_STATUS.COMPLETED;
+        break;
+      case "restaurant-canceled":
+        statusCode = RESERVATION_STATUS.RESTAURANT_CANCELED;
+        break;
+      case "other":
+        statusCode = RESERVATION_STATUS.OTHER;
+        break;
+      
+      default:
+      case "awaiting":
+        statusCode = RESERVATION_STATUS.AWAITING_CUSTOMER;
+        break;
+    }
+    filtersList.push(where("status", "==", statusCode));
+  }
+
+  // Get Reservations results
+  let reservationsQuery = query(
+    collection(db, `Reservations`),
+    ...filtersList,
+    orderBy('reservationDate', 'desc')
+  );
+  const reservations = await getDocs(reservationsQuery).catch((err) => {
+    console.log(err)
+    return response.status(500).json({
+      ...err,
+      message: 'Ocurrió un error al obtener las reservaciones.',
+    });
+  });
+  
+  // Parse reservations list if any
+    let reservationsResults = [];
+    for (let document of reservations.docs) {
+      const reservation = document.data();
+
+      // Get restaurant data
+      const restaurant = await getDoc(doc(db, `Restaurants/${reservation.restaurantId}`)).catch((err) => {})
+      
+      // Get Deal related to the reservation
+      const dealReference = doc(db, 'Deals', reservation.dealId);
+      const deal = await getDoc(dealReference).catch((err) => {
+        return response.status(500).json({
+          ...err,
+          message: 'Ocurrió un error al obtener la oferta vinculada con esta reservación.',
         });
       });
-      //return response.json(restaurants);
-      return response.json(restaurants[0]);
-    })
-    .catch((err) => {
-      console.error(err);
-      return response.status(500).json({ error: err.code });
-    });
+
+      // Dont include reservation in the list if linked deal is not found
+      if(!deal.exists()){
+        continue;
+      }
+
+      // Preformat a human-readable 'status' description
+      let dealDetails;
+      switch (deal.data().dealType) {
+        case 2:
+          dealDetails = deal.data().details ? `${deal.data()?.details}.` : '';
+          break;
+        case 1:
+        default:
+          dealDetails = `${deal.data().discount * 100}% de descuento.`;
+      }
+
+      // Get Customer from Firestore
+      let customer = await getDoc(doc(db, 'Users', reservation.customerId))
+        .catch((err) => {});
+      let customerEmail = 'Usuario no encontrado';
+      if(customer.exists()){
+        customerEmail = customer.data().email;
+      } else {
+        // If user was not found, try to get it from Firebase Auth
+        customer = await adminAuth.getUser(reservation.customerId).catch((err) => {});
+        if(customer){
+          customerEmail = customer.email; 
+        }
+      }
+
+      // Determine status description
+      let statusDescription = getReservationStatusDetails(reservation.status);
+
+      // Format deal data
+      reservationsResults.push({
+        id: document.id,
+        ...reservation,
+        statusDescription,
+        checkIn: reservation.checkIn ? dayjs(reservation.checkIn).toDate() : null,
+        createdAt: reservation.createdAt.toDate(),
+        reservationDate: reservation.reservationDate.toDate(),
+        restaurantName: restaurant.data().name,
+        dealType: deal.data().dealType,
+        dealDetails,
+        dealTerms: deal.data().terms ? deal.data().terms : '',
+        customer: customerEmail,
+      });
+    }
+    return response.json(reservationsResults);
 };
 
 // Verify username availability
@@ -279,7 +413,8 @@ exports.isUsernameAvailable = async (request, response) => {
     .catch((err) => {
       console.error(err);
       return response.status(500).json({
-        error: err.code,
+        ...err,
+        message: 'Ocurrió un error al verificar la disponibilidad del nombre de usuario.',
       });
     });
 };
@@ -298,7 +433,7 @@ exports.claimDeal = (request, response) => {
     })
     .catch((err) => {
       console.error(err);
-      return response.status(500).json({ error: err.code });
+      return response.status(500).json({ ...err, message: 'Ocurrió un error al reclamar la oferta.' });
     });
 };
 exports.redeemDeal = (request, response) => {
@@ -317,46 +452,10 @@ exports.redeemDeal = (request, response) => {
     })
     .catch((err) => {
       console.error(err);
-      return response.status(500).json({ error: err.code });
+      return response.status(500).json({ ...err, message: 'Ocurrió un error al redimir la oferta.' });
     });
 };
 
-//////////////
-exports.getPartnerRestaurant = (request, response) => {
-  let document = getDocs(
-    query(
-      collection(db, "Restaurants"),
-      where("userId", "==", request.user.uid)
-    )
-  )
-    .then((data) => {
-      if (data.size < 1) {
-        return response.status(404).json({
-          error: "no results",
-        });
-      }
+//
 
-      //
-      let restaurants = {};
-      let i = 0;
-      data.forEach((doc) => {
-        // only get first restaurant
-        if (i == 0) {
-          restaurants = {
-            id: doc.id,
-            ...doc.data(),
-          };
-        }
-        i++;
-      });
 
-      //
-      return response.json(restaurants);
-    })
-    .catch((err) => {
-      console.error(err);
-      return response.status(500).json({
-        error: err.code,
-      });
-    });
-};
