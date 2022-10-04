@@ -37,7 +37,7 @@ exports.addFavorite = async (request, response) => {
     const favoritesDocs = await getDocs(favoritesQuery)
         .catch((err) => {
             console.error(err);
-            return response.status(500).json({ error: err.code });
+            return response.status(500).json({...err, message: 'Error al obtener favoritos.' });
         });
 
     // To avoid duplicates, early return record if it already exists.
@@ -63,7 +63,7 @@ exports.addFavorite = async (request, response) => {
         }); 
     }).catch((err) => {
         console.error(err);
-        return response.status(500).json({ error: err.code });
+        return response.status(500).json({ ...err, message: 'Error al agregar el restaurante a tus favoritos.' });
     });
 }
 // Get Favorites List
@@ -79,9 +79,10 @@ exports.getFavorites = async (request, response) => {
     const FavsCollection = await getDocs(favoritesQuery)
         .catch((err) => {
             return response.status(500).json({
-                error: err.code
+                ...err,
+                message: 'Error al obtener tus favoritos.'
             });
-        });;
+        });
 
     // Response
     if (FavsCollection.size > 0) {
@@ -175,7 +176,7 @@ exports.getFavorites = async (request, response) => {
         return response.json(favorites);
     } else {
         return response.status(204).json({
-            error: 'No favorites found.'
+            message: 'No se encontraron favoritos.'
         });
     }
 }
@@ -190,20 +191,21 @@ exports.removeFavorite = async (request, response) => {
     const favoritesDocs = await getDocs(favoritesQuery)
         .catch((err) => {
             console.error(err);
-            return response.status(500).json({ error: err.code });
+            return response.status(500).json({ ...err, message: 'Error al obtener tus favoritos.' });
         });
     
     // Remove documents from collection
     favoritesDocs.forEach(async docRef => {
         await deleteDoc(docRef.ref).catch((err) => {
             return response.status(500).json({
-                error: err.code
+                ...err,
+                message: 'Error al eliminar el restaurante de tus favoritos.'
             });
-        });;
+        });
     })
 
     // Return response
     return response.json({
-        message: 'Favorite was removed successfully.'
+        message: 'El restaurante se eliminó correctamente.'
     });
 }
