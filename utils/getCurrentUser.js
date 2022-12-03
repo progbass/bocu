@@ -12,7 +12,7 @@ const {
   where,
   collection,
 } = require("firebase/firestore");
-const { getCurrentUser: getUserData } = require("./auth");
+const { getCurrentUser } = require("./auth");
 
 module.exports = async (request, response) => {
   return new Promise((resolve, reject) => {
@@ -27,7 +27,7 @@ module.exports = async (request, response) => {
 
     //
     try {
-        const user = getUserData(auth, idToken);
+        const user = getCurrentUser(auth, idToken);
         resolve(user);
     } catch(err) {
         reject(err);

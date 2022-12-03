@@ -1,6 +1,7 @@
 const {
   createUserWithEmailAndPassword,
   sendEmailVerification,
+  updateProfile
 } = require("firebase/auth");
 const { auth, db, adminAuth } = require("../utils/admin");
 const {
@@ -22,6 +23,7 @@ const dayjs = require("dayjs");
 const { getReservationStatusDetails, RESERVATION_STATUS } = require("../utils/reservations-utils");
 const { USER_ROLES, LISTING_CONFIG } = require("../utils/app-config");
 const { signIn } = require("./auth");
+const { getUserData } = require("../utils/auth")
 
 function handleError(res, err) {
   return res.status(500).send({ message: `${err.code} - ${err.message}` });
@@ -42,10 +44,25 @@ exports.createUser = async (req, res) => {
     });
     await adminAuth.setCustomUserClaims(user.uid, { role });
 
+    // Create user in the database
+    await setDoc(doc(db, "Users", user.uid), {
+      authId: user.uid,
+      email: user.email,
+      firstName: user.displayName ? user.displayName : '',
+      lastName: user.lastName ? user.lastName : '',
+      role: user.customClaims ? user.customClaims.role : USER_ROLES.CUSTOMER,
+      createdAt: dayjs().toDate(),
+      updatedAt: dayjs().toDate()
+    });
+
+    if(req.query.userRef == USER_ROLES.ADMIN || req.query.userRef == USER_ROLES.SUPER_ADMIN) {
+      return res.json({ message: "Usuario creado exitosamente." });
+    }
+
     // Log user in
     const data = await signIn(user.uid);
 
-    // Send verification emailx
+    // Send verification email
     await sendEmailVerification(auth.currentUser);
 
     // Sign out user
@@ -85,55 +102,44 @@ exports.getUser = async (request, response) => {
   });
   //
   if (user) {
-    // Get Users firestore node
-    const userDoc = await getDoc(doc(db, "Users", user.uid));
-    const userNode = userDoc.data() ? userDoc.data() : {};
+    // Get all user's data
+    const userData = await getUserData(user.uid);
 
     //
-    return response.json({ ...user.toJSON(), ...userNode });
+    return response.json({
+      ...user,
+      ...userData
+    });
   }
   //
   return response.status(404).json({ message: "No se encontró el usuario." });
 };
 exports.editUser = async (request, response) => {
-  const user = await adminAuth
-    .updateUser(request.params.userId, {
-      ...request.body,
-    })
-    .catch((err) => {
-      return response.status(404).json({ ...err, message: "Ocurrió un error alactualizar el usuario." });
+  // Update user profile
+  await updateProfile(auth.currentUser, {
+    ...request.body
+  }).catch((err) => {
+    return response.status(500).json({
+      ...err,
+      message: 'Ocurrió un error al actualizar el usuario.',
     });
+  });
 
-  //
-  if (user) {
-    // Get Users firestore node
-    const userDoc = await getDoc(doc(db, "Users", user.uid));
-    const userNode = userDoc.data() ? userDoc.data() : {};
+  // Get user's complementary data
+  const userData = await getUserData(auth.currentUser.uid);
 
-    //
-    return response.json({ ...user.toJSON(), ...userNode });
-  }
-  //
-  return response.status(404).json({ message: "No se encontró el usuario." });
-
-  // updateDoc(
-  // 	doc(db, `/Users/`, request.params.userId),
-  // 	request.body
-  // ).then((doc) => {
-  // 		response.json({message: 'Updated successfully'});
-  // 	})
-  // 	.catch((err) => {
-  // 		console.error(error);
-  // 		return response.status(500).json({
-  // 			message: "Cannot Update the value"
-  // 		});
-  // 	});
+  // Return user profile
+  return response.json({
+    ...auth.currentUser.toJSON(),
+    ...userData
+  });
 };
 exports.getUsers = async (request, response) => {
+  const usersLimit = parseInt(request.query.limit) || LISTING_CONFIG.MAX_LIMIT;
   let usersList = await getDocs(
     query(
       collection(db, "Users"),
-      limit(LISTING_CONFIG.MAX_LIMIT),
+      limit(usersLimit),
       orderBy("createdAt", "desc")
     )
   ).catch((err) => {
@@ -328,7 +334,10 @@ exports.getUserReservations = async (request, response) => {
       const reservation = document.data();
 
       // Get restaurant data
-      const restaurant = await getDoc(doc(db, `Restaurants/${reservation.restaurantId}`)).catch((err) => {})
+      const restaurant = await getDoc(doc(db, `Restaurants/${reservation.restaurantId}`)).catch((err) => {});
+      if(!restaurant.exists()){
+        continue
+      }
       
       // Get Deal related to the reservation
       const dealReference = doc(db, 'Deals', reservation.dealId);
@@ -380,7 +389,7 @@ exports.getUserReservations = async (request, response) => {
         checkIn: reservation.checkIn ? dayjs(reservation.checkIn).toDate() : null,
         createdAt: reservation.createdAt.toDate(),
         reservationDate: reservation.reservationDate.toDate(),
-        restaurantName: restaurant.data().name,
+        restaurantName: restaurant.data(),
         dealType: deal.data().dealType,
         dealDetails,
         dealTerms: deal.data().terms ? deal.data().terms : '',

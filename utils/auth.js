@@ -1,9 +1,10 @@
 const { onAuthStateChanged, signInWithCustomToken } = require('firebase/auth');
 const { doc, getDocs, getDoc, query, where, collection } = require('firebase/firestore');
-const { auth, db, adminAuth } = require('./admin');
-const { USER_ROLES } = require('./app-config');
+const { auth, db, adminAuth, adminDb } = require('./admin');
+const { USER_ROLES, MAX_STRIKES } = require('./app-config');
 const { CustomError } = require('./CustomError');
 
+//
 exports.isAuthenticated = async (request, response, next) => {
 	// Verify that token is present
 	if (!request.headers.authorization || !request.headers.authorization.startsWith('Bearer ')) {
@@ -48,17 +49,20 @@ exports.isAuthorizated = (opts = { hasRole: [], allowSameUser: true }) => {
 		return res.status(403).send();
 	}
 }
+
+//
 const getCurrentUser = async (auth, idToken) => {
 	const userToken = await signInWithCustomToken(auth, idToken)//await adminAuth.verifyIdToken(idToken);
 	const role = (await userToken.user.getIdTokenResult()).claims?.role;
 	
 	// Get user data
-	const userData = await formatUserData(userToken.user.uid);
+	const userData = await getUserData(userToken.user.uid);
 	return {
 		...userData,
 		uid: userToken.user.uid,
 		token: idToken,
 		accessToken: idToken,
+		refreshToken: userToken.user.stsTokenManager.refreshToken,
 		displayName: userToken.user.displayName,
 		email: userToken.user.email,
 		emailVerified: userToken.user.emailVerified,
@@ -72,17 +76,36 @@ const getCurrentUser = async (auth, idToken) => {
 	} 
 }
 module.exports.getCurrentUser = getCurrentUser;
-const formatUserData = async userId => {
+
+//
+const getUserData = async userId => {
 	// Get User from DB
 	const userDB = await getUser(userId);
 
 	// Get user's restaurant
-	let userRestaurant = await getRestaurants(userId);
-	userRestaurant = userRestaurant.length ? userRestaurant[0].id : null;
+	let userRestaurantsList = await getRestaurants(userId);
+	const userRestaurants = userRestaurantsList.length ? userRestaurantsList : [];
 
+	// Get user's strikes
+	const userStrikes = await adminDb
+		.collection('UserStrikes')
+		.where('userId', '==', userId)
+		.where('discharge', '==', false)
+		.get();
+	let exceededStrikes = userStrikes.size >= MAX_STRIKES ? true : false;
+	const strikes = userStrikes.docs.slice(0, MAX_STRIKES);
+
+	//
 	return {
 		...userDB,
-		restaurantId: userRestaurant
+		restaurants: userRestaurants.map(item => item.id),
+		exceededStrikes,
+		strikes: strikes.map(doc => {
+			return {
+				...doc.data(),
+				createdAt: doc.data().createdAt.toDate()
+			}
+		})
 	}
 }
 const getUser = async userId => {
@@ -103,3 +126,4 @@ const getRestaurants = async userId => {
 	});
 	return userRestaurant.size ? userRestaurant.docs : [];
 }
+module.exports.getUserData = getUserData;
