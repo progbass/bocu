@@ -14,11 +14,14 @@ const {
   where,
 } = require("firebase/firestore");
 const { db, adminDb, admin } = require("../utils/admin");
-const { HUMAN_READABLE_DATE_FORMAT } = require("../utils/app-config");
+const { 
+  HUMAN_READABLE_DATE_FORMAT, 
+  DEFAULT_TAKE_RATE, 
+  RESERVATION_TOLERANCE_MINUTES 
+} = require("../utils/app-config");
 const { isDealValid, doesDealHasRedemptionUsage } = require("../utils/deals-utils");
 const {
   RESERVATION_STATUS,
-  RESERVATION_TOLERANCE_MINUTES,
   isReservationActive,
   isReservationValid,
 } = require("../utils/reservations-utils");
@@ -85,7 +88,8 @@ exports.redeemDeal = async (request, response) => {
       });
     }
 
-    // Get reservations made by current user with a matching restaurant ID (Ex. Retrieved from scanning the QR)
+    // Get reservations made by current user with a matching restaurant ID 
+    // (Ex. Retrieved from scanning the QR)
     const reservationsQuery = query(
       collection(db, `Reservations`),
       where("customerId", "==", request.user.uid),
@@ -152,12 +156,25 @@ exports.redeemDeal = async (request, response) => {
     });
     reservation = await getDoc(reservation.ref);
 
+    // Get Restaurant who provided the Deal
+    const restaurant = await getDoc(doc(db, `Restaurants`, deal.get("restaurantId")))
+      .catch((err) => {
+        return response.status(500).json({
+          ...err,
+          message: 'No se encontró el restaurante vinculado a la oferta.',
+        });
+      })
+
     // Create redemption registry
     const redemptionCollection = collection(db, "DealRedemptions");
     await adminDb.collection("DealRedemptions").add({
       createdAt: dayjs().toDate(),
       customerId: request.user.uid,
       dealId: deal.id,
+      averageTicket: parseFloat(restaurant.get('averageTicket')),
+      takeRate: DEFAULT_TAKE_RATE,
+      restaurantId: restaurant.id,
+      reservationId: reservation.id,
     }).catch((err) => {
       return response.status(500).json({
         message: err,

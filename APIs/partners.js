@@ -16,6 +16,7 @@ const {
   limit,
   orderBy,
 } = require("firebase/firestore");
+const { CustomError } = require("../utils/CustomError");
 const { db, admin, adminAuth } = require("../utils/admin");
 const config = require("../utils/config");
 const { slugifyString } = require("../utils/formatters");
@@ -31,12 +32,14 @@ const {
 } = require("../utils/reservations-utils");
 const {
   DEAL_EXPIRY_DEFAULT_OFFSET_HOURS,
+  DEAL_TYPE,
   isDealValid,
   isDealActive,
 } = require("../utils/deals-utils");
 const { getNewRestaurantObject } = require("../utils/restaurant-utils");
 const { uploadFiletoBucket } = require("../utils/upload-utils");
 const {
+  DEFAULT_TAKE_RATE,
   MAX_CATEGORIES,
   LISTING_CONFIG,
   MAX_RESTAURANTS_PER_USER,
@@ -133,10 +136,17 @@ exports.editPartnerRestaurant = async (request, response) => {
     }
   }
 
+  // Ensure aveerageTicket is a number
+  let averageTicket = restaurant.data().averageTicket;
+  if (request.body.averageTicket) {
+    averageTicket = parseFloat(averageTicket);
+  }
+
   // Update document.
   await updateDoc(restaurantReference, {
     ...request.body,
     categories,
+    averageTicket
   }).catch((err) => {
     console.error(err);
     return response.status(500).json({
@@ -532,23 +542,24 @@ exports.deleteDeal = async (request, response) => {
   });
 };
 
-// Get Reservation List
-exports.getReservationsList = async (request, response) => {
-  const filtersList = [where("restaurantId", "==", request.params.restaurantId)];
+const getReservations = async (restaurantId, queryProps) => {
+  const filtersList = [where("restaurantId", "==", restaurantId)];
+  const queryParams = {
+    ...queryProps
+  }
 
-  // Filter by 'active' state (true by default)
-  if (request.query.active && request.query.active != "") {
+  // Filter by 'active' if param is defined by user.
+  if (queryParams.active && queryParams.active != "") {
     let filterByActive =
-      request.query?.active && request.query?.active == "false" ? false : true;
+      queryParams?.active && queryParams?.active == "false" ? false : true;
     filtersList.push(where("active", "==", filterByActive));
   }
 
   // Filter by date range
-  let range_init = request.query.range_init;
+  let range_init = queryParams.range_init;
   if (range_init && range_init != "") {
-    if (dayjs(request.query.range_init).isValid()) {
-      range_init = dayjs(dayjs(request.query.range_init).toISOString())
-        //.utcOffset(UTC_OFFSET, true)
+    if (dayjs(queryParams.range_init).isValid()) {
+      range_init = dayjs(dayjs(queryParams.range_init).toISOString())
         .toDate();
 
       filtersList.push(
@@ -556,14 +567,13 @@ exports.getReservationsList = async (request, response) => {
       );
     }
   }
-  let range_end = request.query.range_end;
+  let range_end = queryParams.range_end;
   if (range_end && range_end != "") {
-    if (dayjs(request.query.range_end).isValid()) {
-      range_end = dayjs(request.query.range_end)
+    if (dayjs(queryParams.range_end).isValid()) {
+      range_end = dayjs(queryParams.range_end)
         .hour(23)
         .minute(59)
         .second(59)
-        //.utcOffset(UTC_OFFSET, true)
         .toDate();
 
       filtersList.push(
@@ -574,7 +584,7 @@ exports.getReservationsList = async (request, response) => {
 
   // Filtery by status
   let statusCode = undefined;
-  let status = request.query?.status || undefined;
+  let status = queryParams?.status || undefined;
   if (status) {
     switch (status) {
       case "canceled":
@@ -604,56 +614,65 @@ exports.getReservationsList = async (request, response) => {
     filtersList.push(where("status", "==", statusCode));
   }
 
-  // Get Deals collection results
+  // Get Deals results
   let collectionQuery = query(
     collection(db, `Reservations`),
     ...filtersList,
     orderBy("reservationDate", "desc")
   );
-  const collectionReference = await getDocs(collectionQuery).catch((err) => {
-    return response.status(500).json({
+  const reservations = await getDocs(collectionQuery).catch((err) => {
+    throw new CustomError({
       ...err,
+      status: 400, 
       message: "Error al obtener las reservaciones.",
     });
   });
 
-  // Response
-  if (collectionReference.size > 0) {
+  // Return results
+  if (reservations.size > 0) {
+    // Validate and format reservations before returning them
     let reservationsResults = [];
-    for (let document of collectionReference.docs) {
+    for (let document of reservations.docs) {
       const reservation = document.data();
 
       // Get Deal
       const dealReference = doc(db, "Deals", reservation.dealId);
-      const dealSnap = await getDoc(dealReference).catch((err) => {
-        return response.status(500).json({
+      const deal = await getDoc(dealReference).catch((err) => {
+        throw new CustomError({
           ...err,
+          status: 400, 
           message: "Error al obtener la oferta.",
         });
       });
 
       // Confirm that the reservation is linked to a deal
-      if (!dealSnap.exists()) {
+      if (!deal.exists()) {
         continue;
       }
 
       // Determine status description
       let dealDetails;
-      switch (dealSnap.data().dealType) {
-        case 2:
-          dealDetails = dealSnap.data().details
-            ? `${dealSnap.data()?.details}.`
+      switch (deal.data().dealType) {
+        case DEAL_TYPE.PROMOTION:
+          dealDetails = deal.data().details
+            ? `${deal.data()?.details}.`
             : "";
           break;
-        case 1:
+        case DEAL_TYPE.DISCOUNT:
         default:
-          dealDetails = `${dealSnap.data().discount * 100}% de descuento.`;
+          dealDetails = `${deal.data().discount * 100}% de descuento.`;
       }
 
       // Get Customer from Firestore
       let customer = await getDoc(
         doc(db, "Users", reservation.customerId)
-      ).catch((err) => {});
+      ).catch((err) => {
+        throw new CustomError({
+          ...err,
+          status: 400, 
+          message: "Error al obtener la oferta.",
+        });
+      });
       let customerEmail = "Usuario no encontrado";
       if (customer.exists()) {
         customerEmail = customer.data().email;
@@ -674,22 +693,45 @@ exports.getReservationsList = async (request, response) => {
         ...reservation,
         statusDescription,
         checkIn: reservation.checkIn
-          ? dayjs(reservation.checkIn).toDate()
+          ? reservation.checkIn.toDate()
+          : null,
+        cancelledAt: reservation.cancelledAt
+          ? reservation.cancelledAt.toDate()
           : null,
         createdAt: reservation.createdAt.toDate(),
         reservationDate: reservation.reservationDate.toDate(),
-        dealType: dealSnap.data().dealType,
+        dealType: deal.data().dealType,
         dealDetails,
-        dealTerms: dealSnap.data().terms ? dealSnap.data().terms : "",
+        dealTerms: deal.data().terms ? deal.data().terms : "",
         customer: customerEmail,
       });
     }
-    return response.json(reservationsResults);
-  } else {
-    return response.status(204).json({
-      message: "No se encontraron reservaciones.",
+
+    //
+    return reservationsResults
+  } 
+  
+  // Return empty list
+  return []
+}
+
+// Get Reservation List
+exports.getReservationsList = async (request, response) => {
+  const reservations = await getReservations(request.params.restaurantId, request.query)
+  .catch((err) => {
+    return response.status(400).json({
+      ...err,
+      message: err.message
     });
+  });
+
+  // Response
+  if (reservations.length > 0) {
+    return response.json(reservations);
   }
+
+  // Return empty list
+  return response.status(200).json([]);
 };
 
 // Create Category
@@ -1006,6 +1048,168 @@ exports.uploadRestaurantProfilePhoto = async (request, response) => {
   bb.end(request.rawBody);
 };
 
+// Get Balance
+exports.getPartnerCurrentBalanceBACKUP = async (request, response) => {
+  const restaurantId = request.params.restaurantId;
+  const billingPeriodStart = request.query.periodStart;
+  const billingPeriodEnd = request.query.periodEnd;
+
+  // Filter by date range
+  let range_init = dayjs().set('date', 1).toDate();
+  if (billingPeriodStart && dayjs(billingPeriodStart).isValid()) {
+    range_init = dayjs(billingPeriodStart).toDate();
+  }
+  let range_end = dayjs().set('month', dayjs().month()+1).set('date', 0).toDate();
+  if (billingPeriodEnd && dayjs(billingPeriodEnd).isValid()) {
+    range_end = dayjs(billingPeriodEnd).toDate();
+  }
+
+  // Get deal redemptions
+  const billings = await getDocs(query(
+    collection(db, `Billings`),
+    where("restaurantId", "==", restaurantId),
+    where("createdAt", ">=", range_init),
+    where("createdAt", "<=", range_end),
+    where("isPaid", "==", false)
+  ))
+
+  // Calulate balance
+  let balanceCalc = 0;
+  for(const billing of billings.docs) {
+    for(const redemption of billing.get('redemptions')) {
+      const dealRedemption = await getDoc(doc(db, `DealRedemptions/${redemption}`))
+      .catch((err) => {
+        return response.status(500).json({
+          ...err,
+          message: "Error al obtener la redención de la oferta.",
+          });
+      });
+
+      const averageTicket = dealRedemption.data().averageTicket ? parseFloat(dealRedemption.data().averageTicket) : 0;
+      const takeRate = dealRedemption.data().takeRate ? parseFloat(dealRedemption.data().takeRate) : DEFAULT_TAKE_RATE;
+      balanceCalc += averageTicket * takeRate;
+    }
+  }
+
+  // Response
+  return response.json({
+    balance: balanceCalc,
+    redemptionsCount: billings.size,
+    redemptions: billings.docs.map((doc) => {
+      return {
+        ...doc.data(),
+        createdAt: doc.data().createdAt.toDate(),
+        id: doc.id,
+      };
+    })
+  });
+}
+exports.getPartnerCurrentBalance = async (request, response) => {
+  const restaurantId = request.params.restaurantId;
+  const billingPeriodStart = request.query.periodStart;
+  const billingPeriodEnd = request.query.periodEnd;
+
+  // Filter by date range
+  let range_init = dayjs().startOf('month').toDate();
+  if (billingPeriodStart && dayjs(billingPeriodStart).isValid()) {
+    range_init = dayjs(billingPeriodStart).toDate();
+  }
+  let range_end = dayjs().endOf('month').toDate();
+  if (billingPeriodEnd && dayjs(billingPeriodEnd).isValid()) {
+    range_end = dayjs(billingPeriodEnd).toDate();
+  }
+
+  // Calulate balance
+  let balanceCalc = 0;
+  const dealRedemptions = await getDocs(query(
+    collection(db, `DealRedemptions`),
+    where("restaurantId", "==", restaurantId),
+    where("createdAt", ">=", range_init),
+    where("createdAt", "<=", range_end),
+  )).catch((err) => {
+    return response.status(500).json({
+      ...err,
+      message: "Error al obtener las redenciones de la oferta.",
+      });
+  });
+
+  for(const redemption of dealRedemptions.docs) {
+    const averageTicket = redemption.data().averageTicket ? parseFloat(redemption.data().averageTicket) : 0;
+    const takeRate = redemption.data().takeRate ? parseFloat(redemption.data().takeRate) : DEFAULT_TAKE_RATE;
+    balanceCalc += averageTicket * takeRate;
+  }
+
+  // Response
+  return response.json({
+    balance: balanceCalc,
+    redemptionsCount: dealRedemptions.size,
+    redemptions: dealRedemptions.docs.map((doc) => {
+      return {
+        ...doc.data(),
+        createdAt: doc.data().createdAt.toDate(),
+        id: doc.id,
+      };
+    })
+  });
+}
+exports.getPartnerBillings = async (request, response) => {
+  const restaurantId = request.params.restaurantId;
+  const billingPeriodStart = request.query.periodStart;
+  const billingPeriodEnd = request.query.periodEnd;
+  
+  // Filter by date range
+  let range_init = dayjs().set('month', 0).set('date', 1).toDate();
+  if (billingPeriodStart && dayjs(billingPeriodStart).isValid()) {
+    range_init = dayjs(dayjs(billingPeriodStart).toISOString())
+      .toDate();
+  }
+  let range_end = dayjs().set('year', dayjs().year()+1).set('month',0).set('date', 0).toDate();
+  if (billingPeriodEnd && dayjs(billingPeriodEnd).isValid()) {
+    range_end = dayjs(billingPeriodEnd)
+      .hour(23)
+      .minute(59)
+      .second(59)
+      .toDate();
+  }
+
+  // Get restaurant
+  const restaurantDoc = doc(db, "Restaurants", restaurantId);
+  const restaurant = await getDoc(restaurantDoc).catch((err) => {
+    return response.status(404).json({ message: "Restaurante no encontrado." });
+  });
+
+  // Get Billings
+  const billingsQuery = query(
+    collection(db, "Billings"), 
+    where("restaurantId", "==", restaurant.id),
+    where("createdAt", ">=", range_init),
+    where("createdAt", "<=", range_end),
+    orderBy("createdAt", "desc"),
+    orderBy("periodStart", "desc")
+  );
+  const billings = await getDocs(billingsQuery).catch((err) => {
+    console.log(err)
+    return response.status(500).json({ message: "Error al obtener las facturaciones." });
+  });
+
+  // Early return if empty results
+  if(!billings.size){
+    return response.status(200).json([]);
+  }
+
+  // Return
+  return response.json(billings.docs.map((billing) => {
+    return {
+      id: billing.id,
+      ...billing.data(),
+      createdAt: billing.data().createdAt.toDate(),
+      periodStart: billing.data().periodStart.toDate(),
+      periodEnd: billing.data().periodEnd.toDate(),
+      paidAt: billing.data().paidAt ? billing.data().paidAt.toDate() : null,
+    }
+  }));
+}
+
 //////////
 exports.importRestaurants = async (request, response) => {
   // File path.
@@ -1030,29 +1234,24 @@ exports.importRestaurants = async (request, response) => {
         };
 
         // Create restaurant.
-        const newRestaurantItem = {
-          name: restaurant[0],
-          slug: slugifyString(restaurant[0]),
-          description: restaurant[1],
-          deals: [],
-          phone: restaurant[3],
-          photo: restaurant[10],
-          avatar: restaurant[9],
-          qrCode: "",
-          rating: restaurant[5],
-          website: restaurant[4],
-          createdAt: dayjs().toDate(),
-          categories,
-          address: restaurant[7],
-          location: {
-            ...location,
-          },
-          //email: request.user.email,
-          //userId: request.user.uid,
-          // _geoloc: {
-          //     ...location
-          // },
-        };
+        const newRestaurantItem = getNewRestaurantObject(
+          restaurant[0], 
+          '',
+          '',
+          {
+            description: restaurant[1],
+            phone: restaurant[3],
+            photo: restaurant[10],
+            avatar: restaurant[9],
+            rating: restaurant[5],
+            website: restaurant[4],
+            address: restaurant[7],
+            categories,
+            location: {
+              ...location,
+            }
+          }
+        );
 
         // Index in Algolia
         // algoliaIndex.saveObject(newRestaurantItem,
