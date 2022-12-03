@@ -1,5 +1,8 @@
 const { adminDb } = require('../utils/admin');
-const { RESERVATION_STATUS, RESERVATION_TOLERANCE_MINUTES } = require('../utils/reservations-utils');
+const { RESERVATION_STATUS } = require('../utils/reservations-utils');
+const { 
+    RESERVATION_TOLERANCE_MINUTES 
+} = require("../utils/app-config");
 const dayjs = require('dayjs');
 var utc = require('dayjs/plugin/utc');
 var timezone = require('dayjs/plugin/timezone');
@@ -11,7 +14,7 @@ dayjs.tz.setDefault("America/Mexico_City")
 
 //
 exports.updateReservationStatus = async (context) => {
-        // Consistent timestamp
+    // Consistent timestamp
     const now = dayjs();
     const nowWithTolerance = now.subtract(RESERVATION_TOLERANCE_MINUTES, 'minutes').toDate();
     
@@ -28,6 +31,12 @@ exports.updateReservationStatus = async (context) => {
             active: false,
             status: RESERVATION_STATUS.DEAL_EXPIRED
         });
+        await adminDb.collection('UserStrikes').add({
+            userId: doc.data().customerId,
+            createdAt: now.toDate(),
+            reservationId: doc.id,
+            discharge: false
+        })
     }
     
     //

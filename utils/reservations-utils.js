@@ -13,7 +13,6 @@ const RESERVATION_STATUS = {
     DEAL_CANCELED: 9
 }
 exports.RESERVATION_STATUS = RESERVATION_STATUS;
-exports.RESERVATION_TOLERANCE_MINUTES = 15;
 exports.isReservationActive = async(reservation) => {
     if (
         reservation.status == RESERVATION_STATUS.RESERVATION_EXPIRED ||

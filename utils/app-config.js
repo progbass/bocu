@@ -1,6 +1,10 @@
 // Application Configuration
+exports.DEFAULT_TAKE_RATE = 0.10;
 exports.MAX_CATEGORIES = 2;
+exports.MAX_STRIKES = 3;
 exports.MAX_RESTAURANTS_PER_USER = 20;
+exports.DEFAULT_AVERAGE_TICKET = 0;
+exports.RESERVATION_TOLERANCE_MINUTES = 15;
 exports.USER_ROLES = {
     ADMIN: 'admin',
     SUPER_ADMIN: 'super_admin',
