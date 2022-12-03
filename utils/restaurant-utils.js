@@ -1,4 +1,5 @@
 const dayjs = require("dayjs");
+const { DEFAULT_AVERAGE_TICKET } = require("./app-config")
 const { validateAddress, validateName, validatePhone } = require('./validators');
 const { slugifyString } = require("./formatters");
 
@@ -122,6 +123,7 @@ const getNewRestaurantObject = (restaurantName, userEmail, userId, restaurantPro
     email: userEmail,
     userId: userId,
     createdAt: dayjs().toDate(),
+    averageTicket: DEFAULT_AVERAGE_TICKET,
     schedules: [
       {
         dayName: "Lu",
