@@ -7,6 +7,7 @@ exports.updateDealStatus = async () => {
     // Consistent timestamp
     const now = dayjs();
 
+    // Get expired deals
     const dealsCollectionRef = adminDb.collection('Deals')
         .where('expiresAt', '<', Timestamp.fromDate(now.toDate()))
         .where('active', '==', true);
