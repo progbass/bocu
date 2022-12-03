@@ -652,15 +652,18 @@ exports.postRestaurantPhoto = async (request, response) => {
 
 // Serch (with Algolia)
 exports.searchRestaurants = async (request, response) => {
+  // {"query":"","filters":"(categories.slug:Saludables OR categories.slug:Mexicana )","aroundLatLng":"undefined,undefined","aroundRadius":10000}
   const algoliaIndex = algoliaClient.initIndex(request.params.indexName);
   const { query: searchQuery = "" } = request.body;
   const {
     size: userParamSize,
     aroundRadius: userParamRadius,
     p: userParamPage,
+    filters: userParamFilters,
     ...params
   } = request.body;
-
+  const filters =  userParamFilters;
+  
   // Validate Limit param
   let hitsPerPage = SEARCH_CONFIG.MAX_SEARCH_RESULTS_HITS;
   if (userParamSize && parseInt(userParamSize)) {
@@ -681,7 +684,7 @@ exports.searchRestaurants = async (request, response) => {
   const queryResponse = await algoliaIndex
     .search(searchQuery, {
       ...params,
-      //attributesToRetrieve: ['firstname', 'lastname'],
+      filters,
       page,
       aroundRadius,
       hitsPerPage,
@@ -694,6 +697,12 @@ exports.searchRestaurants = async (request, response) => {
       });
     });
 
+  // Early return if there are no results
+  if(!queryResponse.hits.length) {
+    return response.status(204).json([]);
+  }
+
+  // Parse results before returning
   if (queryResponse.hits.length) {
     let hits = queryResponse.hits;
     let results = [];
@@ -717,7 +726,7 @@ exports.searchRestaurants = async (request, response) => {
 
     // Configure each item
     for (let doc of hits) {
-      // Get user 'favorite' if logged in
+      // Get user 'favorites' if logged in
       let isFavorite = false;
       if (favoritesCollection) {
         // Is 'favorite' of the user
@@ -728,11 +737,22 @@ exports.searchRestaurants = async (request, response) => {
         });
       }
 
+      // Format deals list
+      const deals = doc.deals.map((deal) => {
+        return {
+          ...deal,
+          createdAt: Timestamp.fromMillis(deal.createdAt._seconds * 1000).toDate(),
+          startsAt: Timestamp.fromMillis(deal.startsAt._seconds * 1000).toDate(),
+          expiresAt: Timestamp.fromMillis(deal.expiresAt._seconds * 1000).toDate(),
+        };
+      });
+
       // Return restaurant object
       results.push({
         ...doc,
         id: doc.objectID,
         isFavorite,
+        deals
       });
     }
 
@@ -742,6 +762,4 @@ exports.searchRestaurants = async (request, response) => {
       hits: results,
     });
   }
-
-  return response.status(204).json([]);
 };
