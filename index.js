@@ -5,6 +5,9 @@ const bodyParser = require("body-parser");
 const cors = require("cors");
 const { collection, getDocs, query, updateDoc, where, addDoc, setDoc, doc, Timestamp } = require('firebase/firestore');
 const algoliasearch = require("algoliasearch");
+const dayjs = require("dayjs");
+
+// Custom utils
 const { db, adminDb } = require('./utils/admin');
 const { USER_ROLES } = require('./utils/app-config');
 const { isAuthenticated, isAuthorizated } = require("./utils/auth");
@@ -36,6 +39,7 @@ const algoliaClient = algoliasearch(
 );
 const algoliaIndex = algoliaClient.initIndex("Restaurants");
 
+// Import endpoints
 const {
   getUserDeals,
   createUser,
@@ -47,7 +51,6 @@ const {
   editUser,
   isUsernameAvailable,
 } = require("./APIs/users");
-
 const {
   getPartnerRestaurant,
   getPartnerRestaurants,
@@ -64,6 +67,8 @@ const {
   deleteDeal,
 
   getReservationsList,
+  getPartnerCurrentBalance,
+  getPartnerBillings,
 
   createQR,
 
@@ -72,12 +77,10 @@ const {
   importRestaurants,
   updateAllRestaurants
 } = require("./APIs/partners");
-
 const {
   getCategories,
   createCategory
 } = require('./APIs/categories');
-
 const {
   getRestaurant,
   getRestaurants,
@@ -90,30 +93,47 @@ const {
   createRestaurant: createRestaurantGeneral,
   deleteRestaurant: deleteRestaurantGeneral
 } = require("./APIs/restaurants");
-
 const {
   getReservation,
   createReservation,
   cancelReservation,
 } = require("./APIs/reservations");
-
-const { redeemDeal, findDeal, deleteAllDeals } = require("./APIs/deals");
-
+const { 
+  redeemDeal, 
+  findDeal, 
+  deleteAllDeals 
+} = require("./APIs/deals");
 const {
   addFavorite,
   getFavorites,
   removeFavorite,
 } = require("./APIs/favorites");
+const { 
+  loginUser, 
+  logoutUser, 
+  verifyIdToken,
+  resetPassword, 
+  verificateUserEmail ,
+  sendVerificationEmail
+} = require("./APIs/auth");
+const { 
+  getBillings,
+  updateBilling,
+  createBilling,
+  setUserRole, 
+  syncAuthToFirestoreUsers,
+  formatRedemptions,
+  billingsPast
+} = require("./APIs/admin");
 
-const { loginUser, logoutUser, resetPassword, verificateUserEmail } = require("./APIs/auth");
-const { setUserRole, syncAuthToFirestoreUsers} = require("./APIs/admin");
-const dayjs = require("dayjs");
 
-
+// Auth
 app.post("/auth/login", loginUser);
 app.post("/auth/logout", isAuthenticated, logoutUser);
+app.post("/auth/verifyIdToken", verifyIdToken);
 app.post("/auth/password-reset/:email", resetPassword);
-app.post("/auth/email-verification/:userId", verificateUserEmail);
+app.post("/auth/email-verification/:userId", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), verificateUserEmail);
+app.post("/auth/send-verification-email", sendVerificationEmail);
 
 // Users
 app.get("/users", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), getUsers);
@@ -131,6 +151,8 @@ app.get("/reservations/:reservationId", isAuthenticated, getReservation);
 app.post("/reservations", isAuthenticated, createReservation);
 app.delete("/reservations/:reservationId", isAuthenticated, cancelReservation);
 
+// Partners
+app.post("/partner/createQR", isAuthenticated, createQR);
 app.get("/partner/restaurants", isAuthenticated, getPartnerRestaurants);
 app.get("/partner/restaurant/:restaurantId", isAuthenticated, getPartnerRestaurant);
 app.delete("/partner/restaurant/:restaurantId", isAuthenticated, deactivatePartnerRestaurant);
@@ -141,21 +163,23 @@ app.put("/partner/restaurant/:restaurantId/deal/:dealId", isAuthenticated, updat
 app.delete("/partner/restaurant/:restaurantId/deal/:dealId", isAuthenticated, deleteDeal);
 app.post("/partner/restaurant/:restaurantId/deal", isAuthenticated, createDeal);
 app.get("/partner/restaurant/:restaurantId/reservations", isAuthenticated, getReservationsList);
-app.post("/partner/createQR", isAuthenticated, createQR);
-
-app.get("/categories", getCategories);
-app.post("/categories", isAuthenticated, createCategory);
-
 app.get("/partner/restaurant/:restaurantId/menus", isAuthenticated, getRestaurantMenus);
 app.post("/partner/restaurant/:restaurantId/menu", isAuthenticated, postRestaurantMenu);
 app.post("/partner/restaurant/:restaurantId/image", isAuthenticated, uploadRestaurantProfilePhoto);
 app.get("/partner/restaurant/:restaurantId/photos", getRestaurantGallery);
+app.get("/partner/restaurant/:restaurantId/balance", isAuthenticated, getPartnerCurrentBalance );
+app.get("/partner/restaurant/:restaurantId/billings", isAuthenticated, getPartnerBillings);
+
+
+app.get("/categories", getCategories);
+app.post("/categories", isAuthenticated, createCategory);
 app.post("/restaurant/create", isAuthenticated, createRestaurant);
 app.get(
   "/restaurant/:restaurantName/available-name",
   isRestaurantNameAvailable
 );
 
+// Restaurants
 app.get("/restaurants", getRestaurants);
 app.get("/restaurant", getRestaurant);
 app.post("/restaurant", isAuthenticated, createRestaurantGeneral);
@@ -180,27 +204,31 @@ app.delete("/favorites/:restaurantId", isAuthenticated, removeFavorite);
 app.post("/search/:indexName/query", searchRestaurants);
 
 // Admin
+app.post("/admin/redemptions", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.SUPER_ADMIN] }), formatRedemptions);
+app.post("/admin/billings-past", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.SUPER_ADMIN] }), billingsPast);
+app.post("/admin/billing", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), createBilling);
+app.get("/admin/billings/restaurant/:restaurantId", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), getBillings);
+app.put("/admin/billing/:billingId", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), updateBilling);
 app.post("/admin/setUserRole", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), setUserRole);
 app.post("/admin/syncAuthToFirestoreUsers", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.SUPER_ADMIN] }), syncAuthToFirestoreUsers);
 
 // Utils
-app.post("/import/restaurants", importRestaurants);
-app.put("/update/restaurants", updateAllRestaurants);
+app.post("/import/restaurants", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.SUPER_ADMIN] }), importRestaurants);
+app.put("/update/restaurants", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.SUPER_ADMIN] }), updateAllRestaurants);
+//app.post('/deals/deleteAllDeals', isAuthenticated, deleteAllDeals); // <------ DAnGEROUS UTILITY
+// app.get('/deals-status', isAuthenticated, updateDealStatus) // <-- UTILITY
+// app.get('/reservation-status', isAuthenticated, updateReservationStatus); // <-- UTILITY
 
-//
+// Generic Error Handler
 const handleError = async (err, req, res) => {
   console.log(err);
   return res.status(err.status).json({ ...err, message: err.message });
 }
 app.use(handleError);
 
-
-//app.post('/deals/deleteAllDeals', isAuthenticated, deleteAllDeals); // <------ DAnGEROUS UTILITY
-// app.get('/deals-status', isAuthenticated, updateDealStatus) // <-- UTILITY
-// app.get('/reservation-status', isAuthenticated, updateReservationStatus); // <-- UTILITY
-
-//
+// Export API endpoints
 exports.api = functions.https.onRequest(app);
+
 
 ////////////////////////////////////////
 // CronJobs
@@ -208,6 +236,7 @@ exports.updateDealStatus = functions.pubsub
   .schedule("*/15 * * * *")
   .timeZone("America/Mexico_City")
   .onRun(updateDealStatus);
+
 
 exports.updateReservationStatus = functions.pubsub
   .schedule("*/15 * * * *")
@@ -433,6 +462,7 @@ exports.updateReservationStatus = functions.pubsub
       if(!deal.active){
         deals = deals.filter((item) => item.id != snap.after.id)
       } else {
+        deals = deals.filter((item) => item.id != snap.after.id)
         deals = [...deals, {
           id: snap.after.id, 
           ...deal,
