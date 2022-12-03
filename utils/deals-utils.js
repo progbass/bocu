@@ -4,7 +4,13 @@ const dayjs = require("dayjs");
 exports.DEAL_EXPIRY_DEFAULT_OFFSET_HOURS = 2;
 const DEAL_USAGE_ILIMITED = -1;
 exports.DEAL_USAGE_ILIMITED = DEAL_USAGE_ILIMITED;
+const DEAL_TYPE = {
+  DISCOUNT: 1,
+  PROMOTION: 2
+}
+exports.DEAL_TYPE = DEAL_TYPE;
 
+//
 const doesDealHasRedemptionUsage = (deal) => {
   if (deal.useMax != DEAL_USAGE_ILIMITED) {
     if (deal.useCount >= deal.useMax) {
