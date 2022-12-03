@@ -139,9 +139,16 @@ exports.cancelReservation = async (request, response) => {
         // Update deal use count
         const dealRef = adminDb.doc(`Deals/${reservation.get('dealId')}`);
         const deal = await dealRef.get();
+        let isDealActive = true;
         let useCount = deal.get('useCount')-1;
         useCount = useCount > 0 ? useCount : 0;
-        await dealRef.update({useCount})
+        if(useCount >= deal.get('maxUseCount')){
+          isDealActive = false;  
+        }
+        await dealRef.update({
+            useCount,
+            active: isDealActive
+        })
 
         // Send confirmation to user
         return response.status(200).json({ ...reservation.data(), id: reservation.id })
