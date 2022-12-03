@@ -22,6 +22,7 @@ class CustomError extends CustomErrorTemplate {
       const { message = 'Error', status = 500, ...rest } = props
       super(message);
       this.status = status;
+      this.message = message;
     }
   }
 exports.CustomError = CustomError;
