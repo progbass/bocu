@@ -542,6 +542,7 @@ exports.deleteDeal = async (request, response) => {
   });
 };
 
+// RESERVATIONS CRUD
 const getReservations = async (restaurantId, queryProps) => {
   const filtersList = [where("restaurantId", "==", restaurantId)];
   const queryParams = {
@@ -714,8 +715,6 @@ const getReservations = async (restaurantId, queryProps) => {
   // Return empty list
   return []
 }
-
-// Get Reservation List
 exports.getReservationsList = async (request, response) => {
   const reservations = await getReservations(request.params.restaurantId, request.query)
   .catch((err) => {
@@ -734,7 +733,7 @@ exports.getReservationsList = async (request, response) => {
   return response.status(200).json([]);
 };
 
-// Create Category
+// CATEGORIES CRUD
 exports.createCategory = (request, response) => {
   let newCategoryItem = {
     active: true,
@@ -761,7 +760,6 @@ exports.createCategory = (request, response) => {
         .json({ ...err, message: "Error al agregar la categoría." });
     });
 };
-// Get Categories
 exports.getCategories = async (request, response) => {
   // Get Deals collection
   const dealsQuery = query(collection(`Categories`));
@@ -1049,61 +1047,6 @@ exports.uploadRestaurantProfilePhoto = async (request, response) => {
 };
 
 // Get Balance
-exports.getPartnerCurrentBalanceBACKUP = async (request, response) => {
-  const restaurantId = request.params.restaurantId;
-  const billingPeriodStart = request.query.periodStart;
-  const billingPeriodEnd = request.query.periodEnd;
-
-  // Filter by date range
-  let range_init = dayjs().set('date', 1).toDate();
-  if (billingPeriodStart && dayjs(billingPeriodStart).isValid()) {
-    range_init = dayjs(billingPeriodStart).toDate();
-  }
-  let range_end = dayjs().set('month', dayjs().month()+1).set('date', 0).toDate();
-  if (billingPeriodEnd && dayjs(billingPeriodEnd).isValid()) {
-    range_end = dayjs(billingPeriodEnd).toDate();
-  }
-
-  // Get deal redemptions
-  const billings = await getDocs(query(
-    collection(db, `Billings`),
-    where("restaurantId", "==", restaurantId),
-    where("createdAt", ">=", range_init),
-    where("createdAt", "<=", range_end),
-    where("isPaid", "==", false)
-  ))
-
-  // Calulate balance
-  let balanceCalc = 0;
-  for(const billing of billings.docs) {
-    for(const redemption of billing.get('redemptions')) {
-      const dealRedemption = await getDoc(doc(db, `DealRedemptions/${redemption}`))
-      .catch((err) => {
-        return response.status(500).json({
-          ...err,
-          message: "Error al obtener la redención de la oferta.",
-          });
-      });
-
-      const averageTicket = dealRedemption.data().averageTicket ? parseFloat(dealRedemption.data().averageTicket) : 0;
-      const takeRate = dealRedemption.data().takeRate ? parseFloat(dealRedemption.data().takeRate) : DEFAULT_TAKE_RATE;
-      balanceCalc += averageTicket * takeRate;
-    }
-  }
-
-  // Response
-  return response.json({
-    balance: balanceCalc,
-    redemptionsCount: billings.size,
-    redemptions: billings.docs.map((doc) => {
-      return {
-        ...doc.data(),
-        createdAt: doc.data().createdAt.toDate(),
-        id: doc.id,
-      };
-    })
-  });
-}
 exports.getPartnerCurrentBalance = async (request, response) => {
   const restaurantId = request.params.restaurantId;
   const billingPeriodStart = request.query.periodStart;
@@ -1408,7 +1351,6 @@ const generateQR = async (restaurantId, path) => {
 
   return file.publicUrl();
 };
-
 const base64MimeType = (encoded) => {
   var result = null;
 
@@ -1425,6 +1367,7 @@ const base64MimeType = (encoded) => {
   return result;
 };
 
+// UTILS
 const validateName = (name) => {
   // Name validations
   if (name != undefined && name != "") {
