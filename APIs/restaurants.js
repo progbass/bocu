@@ -29,8 +29,6 @@ const {
 const { uploadFiletoBucket } = require("../utils/upload-utils");
 const { isDealActive, isDealValid } = require("../utils/deals-utils");
 const getCurrentUser = require("../utils/getCurrentUser");
-const { slugifyString } = require("../utils/formatters");
-const dayjs = require("dayjs");
 const algoliasearch = require("algoliasearch");
 
 // Config Algolia SDK
@@ -193,10 +191,31 @@ exports.getRestaurant = async (request, response) => {
 };
 // GET LIST OF RESTAURANTS
 exports.getRestaurants = async (request, response) => {
+  // Filters
+  const filters = [];
+  if(request.query.verified) {
+    const getVerified = request.query.verified == 'true' || false;
+     filters.push(where('isApproved', '==', getVerified));
+  }
+  if(request.query.active) {
+    const getActive = request.query.active == 'true' || false;
+     filters.push(where('active', '==', getActive));
+  }
+  if(request.query.complete) {
+    const isComplete = request.query.complete == 'true' || false;
+     filters.push(where('hasMinimumRequirements', '==', isComplete));
+  }
+  if(request.query.s) {
+    const search = request.query.s;
+     filters.push(where('name', '==', search));
+  }
+
+  // Get restaurants
   let restaurantsCollection = await getDocs(
     query(
       collection(db, "Restaurants"),
       orderBy("createdAt", "desc"),
+      ...filters,
       limit(LISTING_CONFIG.MAX_LIMIT)
     )
   ).catch((err) => {
