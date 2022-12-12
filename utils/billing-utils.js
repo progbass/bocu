@@ -8,6 +8,8 @@ const getNewBillingObject = (restaurantId, periodStart, periodEnd, props = {}) =
     calculatedBalance: 0,
     manualAdjustment: 0,
     totalBalance: 0,
+    paidQuantity: 0,
+    debtQuantity: 0,
     isPaid: false,
     paidAt: null,
     createdAt: new Date(),
