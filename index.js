@@ -123,7 +123,9 @@ const {
   setUserRole, 
   syncAuthToFirestoreUsers,
   formatRedemptions,
-  billingsPast
+  billingsPast,
+  exportsPartnerBillings,
+  exportsPartnerBillingDetails
 } = require("./APIs/admin");
 
 
@@ -209,6 +211,8 @@ app.post("/admin/billings-past", isAuthenticated, isAuthorizated({ hasRole: [USE
 app.post("/admin/billing", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), createBilling);
 app.get("/admin/billings/restaurant/:restaurantId", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), getBillings);
 app.put("/admin/billing/:billingId", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), updateBilling);
+app.get("/admin/billings/export/:restaurantId", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), exportsPartnerBillings);
+app.get("/admin/billings/details/export/:restaurantId", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), exportsPartnerBillingDetails);
 app.post("/admin/setUserRole", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), setUserRole);
 app.post("/admin/syncAuthToFirestoreUsers", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.SUPER_ADMIN] }), syncAuthToFirestoreUsers);
 
