@@ -1,3 +1,4 @@
+const { stringify } = require("csv-stringify");
 const {
   createUserWithEmailAndPassword,
   sendEmailVerification,
@@ -15,16 +16,12 @@ const {
   orderBy,
   where,
   query,
-  limit,
-  Timestamp,
 } = require("firebase/firestore");
 const functions = require("firebase-functions");
 const dayjs = require("dayjs");
-const { user } = require("firebase-functions/v1/auth");
 const { getNewBillingObject } = require("../utils/billing-utils");
 const { USER_ROLES, DEFAULT_TAKE_RATE, LISTING_CONFIG } = require("../utils/app-config");
-const { signIn } = require("./auth");
-const { response } = require("express");
+const { DEAL_TYPE } = require("../utils/deals-utils");
 
 function handleError(res, err) {
   return res.status(500).send({ message: `${err.code} - ${err.message}` });
@@ -127,6 +124,18 @@ const createRestaurantBilling = async (restaurantId, periodStart, periodEnd, man
     throw new Error("Restaurante no encontrado.");
   });
 
+  // Get Deals whithin period
+  const dealsQuery = query(
+    collection(db, "Deals"),
+    where("restaurantId", "==", restaurantId),
+    where("createdAt", ">=", dayjs(periodStart).toDate()),
+    where("createdAt", "<=", dayjs(periodEnd).toDate()),
+    orderBy("createdAt", "desc")
+  )
+  const deals = await getDocs(dealsQuery).catch((err) => {
+    throw new Error("Error al obtener las ofertas.");
+  });
+
   // Get Redemptions
   const redemptionsQuery = query(
     collection(db, "DealRedemptions"),
@@ -136,7 +145,7 @@ const createRestaurantBilling = async (restaurantId, periodStart, periodEnd, man
     orderBy("createdAt", "desc")
   )
   const redemptions = await getDocs(redemptionsQuery).catch((err) => {
-    throw new Error("Error al obtener las ofertas.");
+    throw new Error("Error al obtener las redenciones.");
   });
 
   // Calculate balance
@@ -156,7 +165,8 @@ const createRestaurantBilling = async (restaurantId, periodStart, periodEnd, man
     dayjs(periodStart).toDate(),
     dayjs(periodEnd).toDate(),
     {
-      redemptions: redemptions.docs.map((deal) => deal.id),  
+      redemptions: redemptions.docs.map((deal) => deal.id),
+      totalDeals: deals.docs.length, 
       calculatedBalance,
       manualAdjustment,
       totalBalance,
@@ -244,10 +254,8 @@ exports.getBillings = async (request, response) => {
   if(billingPeriodStart && dayjs(billingPeriodStart).isValid()) {
     filtersList.push(where("periodStart", ">=", dayjs(billingPeriodStart).toDate()))
   }
-  let filterByPeriodEnd = false;
   if(billingPeriodEnd && dayjs(billingPeriodEnd).isValid()) {
-    filterByPeriodEnd = true;
-    // filtersList.push(where("periodEnd", "<=", dayjs(billingPeriodEnd).toDate()))
+    filtersList.push(where("periodEnd", "<=", dayjs(billingPeriodEnd).toDate()))
   }
   if(manualAdjustment && isNaN(manualAdjustment)){
     return response.status(400).json({
@@ -265,7 +273,8 @@ exports.getBillings = async (request, response) => {
   const billingsQuery = query(
     collection(db, "Billings"), 
     where("restaurantId", "==", restaurant.id),
-    ...filtersList
+    ...filtersList,
+    orderBy("periodStart", "desc")
   );
   const billings = await getDocs(billingsQuery).catch((err) => {
     console.log(err)
@@ -276,24 +285,30 @@ exports.getBillings = async (request, response) => {
     return response.status(200).json([]);
   }
 
-  // Return
-  return response.json(billings.docs.reduce((billingList, billing) => {
-    if(filterByPeriodEnd && dayjs(billing.get("periodEnd").toDate()).isAfter(dayjs(billingPeriodEnd))){
-      return billingList
-    }
+  //
+  const billingsList = [];
+  for(const billing of billings.docs) {
+    let restaurantName;
+    const restaurant = await getDoc(doc(db, "Restaurants", billing.get("restaurantId"))).catch((err) => {
+      restaurantName = 'Error al obtener el restaurante';
+    });
+    restaurantName = restaurant ? restaurant.get("name") : 'Restaurante no encontrado';
 
-    return [
-      ...billingList,
-      {
-        id: billing.id,
-        ...billing.data(),
-        createdAt: billing.data().createdAt.toDate(),
-        periodStart: billing.data().periodStart.toDate(),
-        periodEnd: billing.data().periodEnd.toDate(),
-        paidAt: billing.data().paidAt ? billing.data().paidAt.toDate() : null,
-      }
-    ]
-  }, []));
+    billingsList.push({
+      id: billing.id,
+      ...billing.data(),
+      paidQuantity: billing.get('paidQuantity') ? billing.get('paidQuantity') : 0,
+      debtQuantity: billing.get('debtQuantity') ? billing.get('debtQuantity') : 0,
+      restaurantName,
+      createdAt: billing.data().createdAt.toDate(),
+      periodStart: billing.data().periodStart.toDate(),
+      periodEnd: billing.data().periodEnd.toDate(),
+      paidAt: billing.data().paidAt ? billing.data().paidAt.toDate() : null,
+    })
+  }
+
+  // Return
+  return response.json(billingsList);
 }
 exports.updateBilling = async (request, response) => {
   /*
@@ -393,6 +408,390 @@ exports.updateBilling = async (request, response) => {
     createdAt: newBilling.get("createdAt").toDate()
   }*/
 };
+exports.exportsPartnerBillings = async (request, response) => {
+  const restaurantId = request.params.restaurantId;
+  const billingPeriodStart = request.query.periodStart;
+  const billingPeriodEnd = request.query.periodEnd;
+  
+  // Filter by date range
+  if(!restaurantId) {
+    return response.status(400).json({ message: "ID del restaurante obligatorio." });
+  }
+  let range_init = dayjs().set('month', 0).set('date', 1).toDate();
+  if (billingPeriodStart && dayjs(billingPeriodStart).isValid()) {
+    range_init = dayjs(dayjs(billingPeriodStart).toISOString())
+      .toDate();
+  }
+  let range_end = dayjs().set('year', dayjs().year()+1).set('month',0).set('date', 0).toDate();
+  if (billingPeriodEnd && dayjs(billingPeriodEnd).isValid()) {
+    range_end = dayjs(billingPeriodEnd)
+      .hour(23)
+      .minute(59)
+      .second(59)
+      .toDate();
+  }
+
+  // Get restaurants
+  const restaurantDoc = await getDoc(doc(db, "Restaurants", restaurantId))
+  .catch((err) => {
+    return response.status(500).json({ message: "Error al obtener los restaurantes." });
+  });
+
+  // Early return if no restaurants found
+  if(!restaurantDoc.exists()){
+    return response.status(404).json({ message: "No se encontraron restaurantes." });
+  }
+  console.log('Restaurant: ', restaurantDoc.get('name'));
+  
+  // Configure csv
+  const columns = [
+    "restaurant",
+    "billingPeriod",
+    "totalDeals",
+    "redemptions",
+    "calculatedBalance",
+    "manualAdjustment",
+    "totalBalance",
+    "paidQuantity",
+    "debtQuantity",
+    "isPaid"
+  ];
+  const stringifier = stringify({ header: true, columns: columns });
+  stringifier.on('finish', function(){
+    //return response.status(200).json({status: 'ok'})//.end(csvData);
+  });
+  
+  // Configure response headers
+  const filename = `billing_from_db.csv`;
+  response.setHeader("Content-Disposition", `attachment; filename=${filename}`);
+  response.setHeader("Content-Type", "text/csv");
+  // response.setHeader("Cache-Control", "no-cache");
+  // response.setHeader("Pragma", "no-cache");
+  response.attachment(filename);
+
+  // Get Billings
+  const restaurantBillings = await getDocs(query(
+    collection(db, "Billings"), 
+    where("restaurantId", "==", restaurantDoc.id),
+    where("periodStart", ">=", range_init),
+    where("periodStart", "<=", range_end),
+    //orderBy("createdAt", "desc"),
+    orderBy("periodStart", "desc")
+  )).catch((err) => {
+    console.log(err)
+    return response.status(500).json({ message: "Error al obtener las facturaciones." });
+  });
+  console.log(range_init, range_end, restaurantBillings.size)
+
+  // Loop throught each billing
+  for(const billing of restaurantBillings.docs ){
+    const billingPeriodStartDate = billing.get("periodStart").toDate();
+    const billingPeriodEndDate = billing.get("periodEnd").toDate();
+    console.log('--- Billing: ', dayjs(billingPeriodStartDate).format('MM'), ' - ', dayjs(billingPeriodEndDate).format('MM'));
+
+    // Get Deals
+    const deals = await getDocs(query(
+      collection(db, "Deals"), 
+      where("restaurantId", "==", restaurantDoc.id),
+      where("createdAt", ">=", billingPeriodStartDate),
+      where("createdAt", "<=", billingPeriodEndDate),
+      orderBy("createdAt", "desc")
+    )).catch((err) => {
+      console.log(err)
+      return response.status(500).json({ message: "Error al obtener las ofertas." });
+    });
+
+    // Get Redemptions
+    const redemptions = await getDocs(query(
+      collection(db, "DealRedemptions"),
+      where("restaurantId", "==", restaurantDoc.id),
+      where("createdAt", ">=", billingPeriodStartDate),
+      where("createdAt", "<=", billingPeriodEndDate),
+    )).catch((err) => {
+      console.log(err)
+      return response.status(500).json({ message: "Error al obtener las ofertas." });
+    })
+
+    //
+    stringifier.write({
+      restaurant: restaurantDoc.get('name'),
+      billingPeriod: dayjs(billingPeriodStartDate).format('MM/YYYY'),
+      totalDeals: deals.size,
+      redemptions: redemptions.size,
+      calculatedBalance: billing.get('calculatedBalance') || 0,
+      manualAdjustment: billing.get('manualAdjustment') || 0,
+      totalBalance: billing.get('totalBalance') || 0,
+      paidQuantity: billing.get('paidQuantity') || 0,
+      debtQuantity: billing.get('debtQuantity') || 0,
+      isPaid: billing.get('isPaid')
+    });
+  }
+
+  // Write csv
+  stringifier.pipe(response);
+  stringifier.end();
+}
+exports.exportsPartnerBillingDetails = async (request, response) => {
+  const restaurantId = request.params.restaurantId;
+  const billingPeriodStart = request.query.periodStart;
+  const billingPeriodEnd = request.query.periodEnd;
+  
+  // Filter by date range
+  if(!restaurantId) {
+    return response.status(400).json({ message: "ID del restaurante obligatorio." });
+  }
+  let range_init = dayjs().set('month', 0).set('date', 1).toDate();
+  if (billingPeriodStart && dayjs(billingPeriodStart).isValid()) {
+    range_init = dayjs(dayjs(billingPeriodStart).toISOString())
+      .toDate();
+  }
+  let range_end = dayjs().set('year', dayjs().year()+1).set('month',0).set('date', 0).toDate();
+  if (billingPeriodEnd && dayjs(billingPeriodEnd).isValid()) {
+    range_end = dayjs(billingPeriodEnd)
+      .hour(23)
+      .minute(59)
+      .second(59)
+      .toDate();
+  }
+
+  // Get restaurants
+  const restaurantDoc = await getDoc(doc(db, "Restaurants", restaurantId))
+  .catch((err) => {
+    return response.status(500).json({ message: "Error al obtener los restaurantes." });
+  });
+
+  // Early return if no restaurants found
+  if(!restaurantDoc.exists()){
+    return response.status(404).json({ message: "No se encontraron restaurantes." });
+  }
+  
+  // Configure csv
+  const columns = [
+    'restaurant',
+    'dealId',
+    'createdAt',
+    'startsAt',
+    'expiresAt',
+    'includeDrinks',
+    'type',
+    'details',
+    'redeemed',
+    'redeemedAt',
+    'userRedemption',
+    'reservationPeople',
+    'averageTicket',
+    'takeRate'
+  ];
+  const stringifier = stringify({ header: true, columns: columns });
+  stringifier.on('finish', function(){
+    //return response.status(200).json({status: 'ok'})//.end(csvData);
+  });
+  
+  // Configure response headers
+  const filename = `saved_from_db.csv`;
+  response.setHeader("Content-Disposition", `attachment; filename=${filename}`);
+  response.setHeader("Content-Type", "text/csv");
+  // response.setHeader("Cache-Control", "no-cache");
+  // response.setHeader("Pragma", "no-cache");
+  response.attachment(filename);
+
+  // Get Redemptions
+  const redemptions = await getDocs(query(
+    collection(db, "DealRedemptions"),
+    where("restaurantId", "==", restaurantDoc.id),
+    where("createdAt", ">=", range_init),
+    where("createdAt", "<=", range_end),
+  )).catch((err) => {
+    console.log(err)
+    return response.status(500).json({ message: "Error al obtener las redenciones." });
+  })
+
+  // Get Deals
+  const deals = await getDocs(query(
+    collection(db, "Deals"), 
+    where("restaurantId", "==", restaurantDoc.id),
+    where("createdAt", ">=", range_init),
+    where("createdAt", "<=", range_end),
+    orderBy("createdAt", "desc"),
+  )).catch((err) => {
+    console.log(err)
+    return response.status(500).json({ message: "Error al obtener las ofertas." });
+  });
+
+  // Loop throught each deal
+  for(const deal of deals.docs ){
+    // Get redemptions
+    let redemptionDetails = {
+      redeemed: false,
+      redeemedAt: 'N/A',
+      userRedemption: 'N/A',
+      reservationPeople: 'N/A',
+      averageTicket: 'N/A',
+    }
+    const redemption = redemptions.docs.find((redemption) => redemption.get('dealId') == deal.id);
+    if(redemption){
+      // console.log(deal.id, redemption.id, redemption.get('reservationId'))
+      const averageTicket = redemption.get('averageTicket');
+      const takeRate = `${redemption.get('takeRate') * 100} %`;
+
+      // Get user details
+      let userRedemption = 'N/A';
+      if(redemption.get('customerId')){
+        const user = await getDoc(doc(db, "Users", redemption.get('customerId'))).catch((err) => {
+          userRedemption = 'N/A';
+        });
+        userRedemption = user.get('email');
+      }
+
+      // Get reservation details
+      let reservationPeople = 'N/A';
+      if(redemption.get('reservationId')){
+        const reservation = await getDoc(doc(db, "Reservations", redemption.get('reservationId'))).catch((err) => {
+          reservationPeople = 'N/A';
+        });
+        reservationPeople = reservation.get("count");
+      }
+
+      // Format redemption details
+      redemptionDetails = {
+        redeemed: true,
+        redeemedAt: dayjs(redemption.get("createdAt").toDate()).format('DD/MM/YYYY HH:mm:ss'),
+        userRedemption,
+        reservationPeople,
+        averageTicket,
+        takeRate
+      }
+    }
+
+    //
+    stringifier.write({
+      restaurant: restaurantDoc.get('name'),
+      dealId: deal.id,
+      createdAt: dayjs(deal.get("createdAt").toDate()).format('DD/MM/YYYY'),
+      startsAt: dayjs(deal.get("startsAt").toDate()).format('DD/MM/YYYY HH:mm:ss'),
+      expiresAt: dayjs(deal.get("expiresAt").toDate()).format('DD/MM/YYYY HH:mm:ss'), 
+      includeDrinks: deal.get('include_drinks') ? 'Yes' : 'No',
+      type: deal.get('dealType') == DEAL_TYPE.DISCOUNT ? 'Descuento' : 'Promoción',
+      details: deal.get('dealType') == DEAL_TYPE.DISCOUNT ? `${deal.get('discount') * 100} %` : deal.get('details'),
+      ...redemptionDetails
+    });
+  }
+
+  // Write csv
+  stringifier.pipe(response);
+  stringifier.end();
+}
+exports.exportsPartnerBillings2 = async (request, response) => {
+  const restaurantId = request.params.restaurantId;
+  const billingPeriodStart = request.query.periodStart;
+  const billingPeriodEnd = request.query.periodEnd;
+  
+  // Filter by date range
+  let range_init = dayjs().set('month', 0).set('date', 1).toDate();
+  if (billingPeriodStart && dayjs(billingPeriodStart).isValid()) {
+    range_init = dayjs(dayjs(billingPeriodStart).toISOString())
+      .toDate();
+  }
+  let range_end = dayjs().set('year', dayjs().year()+1).set('month',0).set('date', 0).toDate();
+  if (billingPeriodEnd && dayjs(billingPeriodEnd).isValid()) {
+    range_end = dayjs(billingPeriodEnd)
+      .hour(23)
+      .minute(59)
+      .second(59)
+      .toDate();
+  }
+
+  // Get restaurants
+  const restaurantDocs = await getDocs(query(
+    collection(db, "Restaurants"),
+  )).catch((err) => {
+    return response.status(500).json({ message: "Error al obtener los restaurantes." });
+  });
+
+  // Early return if no restaurants found
+  if(!restaurantDocs.size){
+    return response.status(404).json({ message: "No se encontraron restaurantes." });
+  }
+  
+  // Configure csv
+  const columns = [
+    "restaurant",
+    "billingPeriod",
+    "dealId",
+    "redemptionDate",
+    "averageTicket",
+    "takeRate",
+    "total"
+  ];
+  const stringifier = stringify({ header: true, columns: columns });
+  stringifier.on('finish', function(){
+    //return response.status(200).json({status: 'ok'})//.end(csvData);
+  });
+  
+  // Configure response headers
+  const filename = `saved_from_db.csv`;
+  response.setHeader("Content-Disposition", `attachment; filename=${filename}`);
+  response.setHeader("Content-Type", "text/csv");
+  response.attachment(filename);
+
+  // Get billings from each restaurant
+  for(const restaurantDoc of restaurantDocs.docs){
+    console.log('Restaurant: ', restaurantDoc.get('name'));
+
+    // Get Billings
+    const billingsQuery = query(
+      collection(db, "Billings"), 
+      where("restaurantId", "==", restaurantDoc.id),
+      where("createdAt", ">=", range_init),
+      where("createdAt", "<=", range_end),
+      orderBy("createdAt", "desc"),
+      orderBy("periodStart", "desc")
+    );
+    const restaurantBillings = await getDocs(billingsQuery).catch((err) => {
+      console.log(err)
+      return response.status(500).json({ message: "Error al obtener las facturaciones." });
+    });
+
+    // Loop throught each billing
+    for(const billing of restaurantBillings.docs ){
+      const billingPeriodStartDate = billing.get("periodStart").toDate();
+      const billingPeriodEndDate = billing.get("periodEnd").toDate();
+      console.log('--- Billing: ', dayjs(billingPeriodStartDate).format('MM'), ' - ', dayjs(billingPeriodEndDate).format('MM'));
+
+      // Get Deals
+      const billingDeals = await getDocs(query(
+        collection(db, "DealRedemptions"),
+        where("restaurantId", "==", restaurantDoc.id),
+        where("createdAt", ">=", billingPeriodStartDate),
+        where("createdAt", "<=", billingPeriodEndDate),
+      )).catch((err) => {
+        console.log(err)
+        return response.status(500).json({ message: "Error al obtener las ofertas." });
+      })
+
+      // Loop through every deal
+      for(const deal of billingDeals.docs){
+        const redemptionDate = deal.get("createdAt").toDate();
+        console.log('------ Deal: ', deal.id, ' - ', dayjs(redemptionDate).format('DD MM YY'), ' - ', deal.get("averageTicket"), ' - ', deal.get("takeRate"), ' - ', deal.get("averageTicket") * deal.get("takeRate"));
+        
+        //
+        stringifier.write({
+          restaurant: restaurantDoc.get('name'),
+          billingPeriod: dayjs(billingPeriodStartDate).format('MM'),
+          dealId: deal.id,
+          redemptionDate: dayjs(redemptionDate).format('DD MM YY'),
+          averageTicket: deal.get("averageTicket"),
+          takeRate: deal.get("takeRate"),
+          total: deal.get('total')
+        });
+      }
+    }
+  }
+
+  // Write csv
+  stringifier.pipe(response);
+  stringifier.end();
+}
 
 //
 exports.syncAuthToFirestoreUsers = async (req, res) => {
