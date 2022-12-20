@@ -16,18 +16,27 @@ const {
   orderBy,
   where,
   query,
+  limit
 } = require("firebase/firestore");
 const functions = require("firebase-functions");
 const dayjs = require("dayjs");
 const { getNewBillingObject } = require("../utils/billing-utils");
-const { USER_ROLES, DEFAULT_TAKE_RATE, LISTING_CONFIG } = require("../utils/app-config");
+const { USER_ROLES, DEFAULT_TAKE_RATE, LISTING_CONFIG, SEARCH_CONFIG } = require("../utils/app-config");
 const { DEAL_TYPE } = require("../utils/deals-utils");
+const getCurrentUser = require("../utils/getCurrentUser");
+const algoliasearch = require("algoliasearch");
+
+// Config Algolia SDK
+const algoliaClient = algoliasearch(
+  process.env.ALGOLIA_APP_ID,
+  process.env.ALGOLIA_ADMIN_API_KEY
+);
 
 function handleError(res, err) {
   return res.status(500).send({ message: `${err.code} - ${err.message}` });
 }
 
-//
+// Users CRUD
 exports.setUserRole = async (req, res) => {
   try {
     const { uid, role } = req.body;
@@ -115,7 +124,200 @@ exports.deleteUser = async (request, response) => {
   return response.status(200).json({ message: "Success", error: authError });
 };
 
-// Billing
+// Restaurants CRUD
+const getRestaurantsList = async (config = {}) => {
+  const algoliaIndex = algoliaClient.initIndex('Restaurants');
+  
+  // Search configuration
+  const {
+    size: userParamSize,
+    aroundRadius: userParamRadius,
+    p: userParamPage,
+    filters: filters = '',
+    query: searchQuery = '',
+    ...userParams
+  } = config;
+  
+  // Validate filters
+  let hitsPerPage = SEARCH_CONFIG.MAX_SEARCH_RESULTS_HITS;
+  if (userParamSize && parseInt(userParamSize)) {
+    hitsPerPage = userParamSize;
+  }
+  let aroundRadius = SEARCH_CONFIG.DEFAULT_AROUND_RADIUS;
+  if (userParamRadius && parseInt(userParamRadius)) {
+    aroundRadius = userParamRadius;
+  }
+  let page = SEARCH_CONFIG.DEFAULT_PAGE;
+  if (userParamPage && parseInt(userParamPage)) {
+    page = userParamPage;
+  }
+
+  // Get restaurants
+  const searchResults = await algoliaIndex
+  .search(searchQuery, {
+    ...userParams,
+    filters,
+    page,
+    aroundRadius,
+    hitsPerPage,
+  }).catch((err) => {
+    throw err;
+  });
+
+  // Format restaurant docs
+  let docs = searchResults.hits;
+  let restaurants = [];
+  for (let doc of docs) {
+    // Get restaurant ratings
+    const raitingRef = await getDocs(
+      query(
+        collection(db, `RestaurantRatings`),
+        where("restaurantId", "==", doc.id)
+      )
+    ).catch((err) => {
+      console.error(err);
+      return;
+    });
+
+    // Get raitings average
+    let rating = 0;
+    const ratingCount = raitingRef.size;
+    if (ratingCount) {
+      let counterGroups = {
+        one: 0,
+        two: 0,
+        three: 0,
+        four: 0,
+        five: 0,
+      };
+      raitingRef.forEach((doc) => {
+        switch (doc.data().rate) {
+          case 1:
+            counterGroups.one += 1;
+            break;
+          case 2:
+            counterGroups.two += 1;
+            break;
+          case 3:
+            counterGroups.three += 1;
+            break;
+          case 4:
+            counterGroups.four += 1;
+            break;
+          case 5:
+            counterGroups.five += 1;
+            break;
+        }
+      });
+      rating =
+        (1 * counterGroups.one +
+          2 * counterGroups.two +
+          3 * counterGroups.three +
+          4 * counterGroups.four +
+          5 * counterGroups.five) /
+        (5 * ratingCount);
+      rating *= 5;
+      rating = `${rating} (${ratingCount})`;
+    }
+
+    // Return restaurant object
+    restaurants.push({
+      ...doc,
+      id: doc.objectID,
+      rating,
+    });
+  }
+
+  // Return restaurants
+  return {
+    ...searchResults,
+    hits: restaurants,
+  };
+}
+exports.getAdminRestaurants = async (request, response) => {
+  const searchResults = await getRestaurantsList(
+    request.body
+  ).catch((err) => {
+    console.error(err);
+    return response.status(500).json({
+      ...err,
+      message: 'Error al obtener los restaurantes.',
+    });
+  });
+
+  // Early return if there are no results
+  if(!searchResults.hits.length) {
+    return response.status(204).json([]);
+  }
+
+  // Format restaurant docs
+  let docs = searchResults.hits;
+  let restaurants = [];
+  for (let doc of docs) {
+    // Get restaurant ratings
+    const raitingRef = await getDocs(
+      query(
+        collection(db, `RestaurantRatings`),
+        where("restaurantId", "==", doc.id)
+      )
+    ).catch((err) => {
+      console.error(err);
+      return;
+    });
+
+    // Get raitings average
+    let rating = 0;
+    const ratingCount = raitingRef.size;
+    if (ratingCount) {
+      let counterGroups = {
+        one: 0,
+        two: 0,
+        three: 0,
+        four: 0,
+        five: 0,
+      };
+      raitingRef.forEach((doc) => {
+        switch (doc.data().rate) {
+          case 1:
+            counterGroups.one += 1;
+            break;
+          case 2:
+            counterGroups.two += 1;
+            break;
+          case 3:
+            counterGroups.three += 1;
+            break;
+          case 4:
+            counterGroups.four += 1;
+            break;
+          case 5:
+            counterGroups.five += 1;
+            break;
+        }
+      });
+      rating =
+        (1 * counterGroups.one +
+          2 * counterGroups.two +
+          3 * counterGroups.three +
+          4 * counterGroups.four +
+          5 * counterGroups.five) /
+        (5 * ratingCount);
+      rating *= 5;
+      rating = `${rating} (${ratingCount})`;
+    }
+
+    // Return restaurant object
+    restaurants.push({
+      ...doc,
+      rating,
+    });
+  }
+
+  //
+  return response.json(restaurants);
+};
+
+// Billing CRUD
 const createRestaurantBilling = async (restaurantId, periodStart, periodEnd, manualAdjustment = 0) => {
   // Get restaurant
   const restaurant = await getDoc(

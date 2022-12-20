@@ -117,6 +117,7 @@ const {
   sendVerificationEmail
 } = require("./APIs/auth");
 const { 
+  getAdminRestaurants,
   getBillings,
   updateBilling,
   createBilling,
@@ -206,8 +207,9 @@ app.delete("/favorites/:restaurantId", isAuthenticated, removeFavorite);
 app.post("/search/:indexName/query", searchRestaurants);
 
 // Admin
-app.post("/admin/redemptions", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.SUPER_ADMIN] }), formatRedemptions);
-app.post("/admin/billings-past", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.SUPER_ADMIN] }), billingsPast);
+app.get("/admin/restaurants", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), getAdminRestaurants);
+app.post("/admin/redemptions", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), formatRedemptions);
+app.post("/admin/billings-past", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), billingsPast);
 app.post("/admin/billing", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), createBilling);
 app.get("/admin/billings/restaurant/:restaurantId", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), getBillings);
 app.put("/admin/billing/:billingId", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), updateBilling);
