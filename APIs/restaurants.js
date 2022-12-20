@@ -696,7 +696,7 @@ exports.searchRestaurants = async (request, response) => {
 
   let page = SEARCH_CONFIG.DEFAULT_PAGE;
   if (userParamPage && parseInt(userParamPage)) {
-    aroundRadius = userParamPage;
+    page = userParamPage;
   }
 
   // Query Algolia
