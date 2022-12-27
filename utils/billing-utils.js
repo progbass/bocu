@@ -13,6 +13,7 @@ const getNewBillingObject = (restaurantId, periodStart, periodEnd, props = {}) =
     isPaid: false,
     paidAt: null,
     createdAt: new Date(),
+    updatedAt: new Date(),
     periodStart,
     periodEnd,
 
