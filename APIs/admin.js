@@ -153,9 +153,16 @@ const getRestaurantsList = async (config = {}) => {
   }
 
   // Get restaurants
+  console.log({
+    //...userParams,
+    filters,
+    page,
+    aroundRadius,
+    hitsPerPage,
+  })
   const searchResults = await algoliaIndex
   .search(searchQuery, {
-    ...userParams,
+    //...userParams,
     filters,
     page,
     aroundRadius,
@@ -247,7 +254,7 @@ exports.getAdminRestaurants = async (request, response) => {
 
   // Early return if there are no results
   if(!searchResults.hits.length) {
-    return response.status(204).json([]);
+    return response.status(200).json([]);
   }
 
   // Format restaurant docs
@@ -330,8 +337,8 @@ const createRestaurantBilling = async (restaurantId, periodStart, periodEnd, man
   const dealsQuery = query(
     collection(db, "Deals"),
     where("restaurantId", "==", restaurantId),
-    where("createdAt", ">=", dayjs(periodStart).toDate()),
-    where("createdAt", "<=", dayjs(periodEnd).toDate()),
+    where("createdAt", ">=", periodStart),
+    where("createdAt", "<=", periodEnd),
     orderBy("createdAt", "desc")
   )
   const deals = await getDocs(dealsQuery).catch((err) => {
@@ -342,8 +349,8 @@ const createRestaurantBilling = async (restaurantId, periodStart, periodEnd, man
   const redemptionsQuery = query(
     collection(db, "DealRedemptions"),
     where("restaurantId", "==", restaurantId),
-    where("createdAt", ">=", dayjs(periodStart).toDate()),
-    where("createdAt", "<=", dayjs(periodEnd).toDate()),
+    where("createdAt", ">=", periodStart),
+    where("createdAt", "<=", periodEnd),
     orderBy("createdAt", "desc")
   )
   const redemptions = await getDocs(redemptionsQuery).catch((err) => {
@@ -360,6 +367,7 @@ const createRestaurantBilling = async (restaurantId, periodStart, periodEnd, man
 
   // Calculate total balance
   const totalBalance = calculatedBalance + manualAdjustment;
+  const paidQuantity = 0
 
   // Billing object model
   const billing = getNewBillingObject(
@@ -372,6 +380,8 @@ const createRestaurantBilling = async (restaurantId, periodStart, periodEnd, man
       calculatedBalance,
       manualAdjustment,
       totalBalance,
+      paidQuantity: 0,
+      debtQuantity: totalBalance - paidQuantity,
     }
   );
 
@@ -387,8 +397,8 @@ const createRestaurantBilling = async (restaurantId, periodStart, periodEnd, man
 }
 exports.createBilling = async (request, response) => {
   const restaurantId = request.body.restaurantId;
-  const billingPeriodStart = request.body.periodStart;
-  const billingPeriodEnd = request.body.periodEnd;
+  let billingPeriodStart = request.body.periodStart;
+  let billingPeriodEnd = request.body.periodEnd;
   const manualAdjustment = request.body.manualAdjustment ? request.body.manualAdjustment : 0;
 
   // Validations
@@ -405,12 +415,7 @@ exports.createBilling = async (request, response) => {
       message: 'Fecha de inicio facturación inválida.'
     });
   }
-  if(!billingPeriodEnd){
-    return response.status(400).json({
-      message: 'No se encontró la fecha de fin facturación.'
-    });
-  }
-  if(!dayjs(billingPeriodEnd).isValid()) {
+  if(billingPeriodEnd && !dayjs(billingPeriodEnd).isValid()){
     return response.status(400).json({
       message: 'Fecha de fin facturación inválida.'
     });
@@ -420,6 +425,10 @@ exports.createBilling = async (request, response) => {
       message: 'Ajuste manual inválido.'
     });
   }
+
+  // Set period dates
+  billingPeriodStart = dayjs(billingPeriodStart).startOf('month').toDate();
+  billingPeriodEnd = billingPeriodEnd || dayjs(billingPeriodStart).endOf('month').toDate();
 
   // Create billing
   const billing = await createRestaurantBilling(
@@ -439,36 +448,40 @@ exports.createBilling = async (request, response) => {
     ...billing.data(),
     periodStart: billing.get("periodStart").toDate(),
     periodEnd: billing.get("periodEnd").toDate(),
-    createdAt: billing.get("createdAt").toDate()
+    createdAt: billing.get("createdAt").toDate(),
+    updatedAt: billing.get("updatedAt").toDate()
   });
 }
-exports.getBillings = async (request, response) => {
-  const restaurantId = request.params.restaurantId;
-  const billingPeriodStart = request.query.periodStart;
-  const billingPeriodEnd = request.query.periodEnd;
-  const manualAdjustment = request.query.manualAdjustment ? request.query.manualAdjustment : 0;
+const getRestaurantBilling = async (restaurantId = undefined, queryParams = {}) => {
+  const billingPeriodStart = queryParams.periodStart;
+  const billingPeriodEnd = queryParams.periodEnd;
+  const manualAdjustment = queryParams.manualAdjustment ? queryParams.manualAdjustment : 0;
   const filtersList = [];
 
   // Validations
   if(!restaurantId) {
-    return response.status(400).json({ message: "ID del restaurante obligatorio." });
+    throw new Error("ID del restaurante obligatorio.");
+    //return response.status(400).json({ message: "ID del restaurante obligatorio." });
   }
   if(billingPeriodStart && dayjs(billingPeriodStart).isValid()) {
     filtersList.push(where("periodStart", ">=", dayjs(billingPeriodStart).toDate()))
   }
   if(billingPeriodEnd && dayjs(billingPeriodEnd).isValid()) {
-    filtersList.push(where("periodEnd", "<=", dayjs(billingPeriodEnd).toDate()))
+    filtersList.push(where("periodStart", "<=", dayjs(billingPeriodEnd).toDate()))
+    //filtersList.push(where("periodEnd", "<=", dayjs(billingPeriodEnd).toDate()))
   }
   if(manualAdjustment && isNaN(manualAdjustment)){
-    return response.status(400).json({
-      message: 'Ajuste manual inválido.'
-    });
+    throw new Error("Ajuste manual inválido.");
+    // return response.status(400).json({
+    //   message: 'Ajuste manual inválido.'
+    // });
   }
 
   // Get restaurant
   const restaurantDoc = doc(db, "Restaurants", restaurantId);
   const restaurant = await getDoc(restaurantDoc).catch((err) => {
-    return response.status(404).json({ message: "Restaurante no encontrado." });
+    throw new Error("Restaurante no encontrado.");
+    //return response.status(404).json({ message: "Restaurante no encontrado." });
   });
 
   // Get Billings
@@ -479,12 +492,11 @@ exports.getBillings = async (request, response) => {
     orderBy("periodStart", "desc")
   );
   const billings = await getDocs(billingsQuery).catch((err) => {
-    console.log(err)
-    return response.status(500).json({ message: "Error al obtener las facturaciones." });
+    throw new Error("Error al obtener las facturaciones.");
+    //return response.status(500).json({ message: "Error al obtener las facturaciones." });
   });
-
   if(billings.empty){
-    return response.status(200).json([]);
+    return [];
   }
 
   //
@@ -509,95 +521,84 @@ exports.getBillings = async (request, response) => {
     })
   }
 
+  return billingsList;
+}
+exports.getBillings = async (request, response) => {
+  const restaurantBillings = await getRestaurantBilling(
+    request.params.restaurantId,
+    {
+      periodStart: request.query.periodStart,
+      periodEnd: request.query.periodEnd,
+      manualAdjustment: request.query.manualAdjustment
+    }
+  ).catch((err) => {
+    //console.log(err)
+    return response.status(500).json({ message: err.message });
+  });
+  
   // Return
-  return response.json(billingsList);
+  return response.json(restaurantBillings);
 }
 exports.updateBilling = async (request, response) => {
-  /*
   const billingId = request.params.billingId;
-  //const redemptions = request.body.redemptions || [];
-  const billingPeriodStart = request.body.periodStart;
-  const billingPeriodEnd = request.body.periodEnd;
-  const manualAdjustment = request.body.manualAdjustment ? request.body.manualAdjustment : 0;
+  if(!billingId) {
+    return response.status(400).json({ message: "ID de la factura obligatorio." });
+  }
+
+  // Get Billing
+  const billing = await getDoc(doc(db, "Billings", billingId));
+  if(!billing.exists()){
+    return response.status(404).json({ message: "Factura no encontrada." });
+  }
+  const paidQuantity = !isNaN(request.body.paidQuantity) ? Number(request.body.paidQuantity) : (billing.get('paidQuantity') || 0);
+  const manualAdjustment = !isNaN(request.body.manualAdjustment) ? Number(request.body.manualAdjustment) : billing.get('manualAdjustment');
+  const isPaid = request.body.isPaid != undefined ? request.body.isPaid : billing.get('isPaid');
 
   // Validations
-  if(!restaurantId) {
-    return response.status(400).json({ message: "ID del restaurante obligatorio." });
-  }
-  if(!billingPeriodStart){
-    return response.status(400).json({
-      message: 'No se encontró la fecha de inicio facturación.'
-    });
-  }
-  if(!dayjs(billingPeriodStart).isValid()) {
-    return response.status(400).json({
-      message: 'Fecha de inicio facturación inválida.'
-    });
-  }
-  if(!billingPeriodEnd){
-    return response.status(400).json({
-      message: 'No se encontró la fecha de fin facturación.'
-    });
-  }
-  if(!dayjs(billingPeriodEnd).isValid()) {
-    return response.status(400).json({
-      message: 'Fecha de fin facturación inválida.'
-    });
+  if(paidQuantity && isNaN(paidQuantity)) {
+    return response.status(400).json({ message: "La cantidad de pago debe ser un número." });
   }
   if(manualAdjustment && isNaN(manualAdjustment)){
     return response.status(400).json({
-      message: 'Ajuste manual inválido.'
+      message: 'La cantidad de ajuste manual debe ser un número.'
     });
   }
 
-  // Get restaurant
-  const restaurantDoc = doc(db, "Restaurants", restaurantId);
-  const restaurant = await getDoc(restaurantDoc).catch((err) => {
-    return response.status(404).json({ message: "Restaurante no encontrado." });
-  });
-
-  // Get Deals
-  const redemptionsQuery = query(
-    collection(db, "DealRedemptions"),
-    where("restaurantId", "==", restaurant.id),
-    where("createdAt", ">=", dayjs(billingPeriodStart).toDate()),
-    where("createdAt", "<=", dayjs(billingPeriodEnd).toDate()),
-    orderBy("createdAt", "desc")
-  )
-  const redemptions = await getDocs(redemptionsQuery).catch((err) => {
-    console.log(err)
-    return response.status(500).json({ message: "Error al obtener las ofertas." });
-  });
-
   // Calculate balance
   let calculatedBalance = 0;
-  redemptions.docs.forEach((redemption) => {
+  for(const redemptionId of billing.get('redemptions')) {
+    // Get Redemption
+    const redemption = await getDoc(doc(db, "DealRedemptions", redemptionId));
+    if(!redemption.exists()){
+      continue;
+    }
+
     const averageTicket = redemption.get("averageTicket") ? parseFloat(redemption.get("averageTicket")) : 0;
     const takeRate = redemption.get("takeRate") ? parseFloat(redemption.get("takeRate")) : DEFAULT_TAKE_RATE;
     calculatedBalance += averageTicket * takeRate;
-  });
+  }
 
   // Calculate total balance
   const totalBalance = calculatedBalance + manualAdjustment;
+  const debtQuantity = totalBalance - paidQuantity;
 
-  // Billing object model
-  const billing = getNewBillingObject(
-    restaurant.id,
-    dayjs(billingPeriodStart).toDate(),
-    dayjs(billingPeriodEnd).toDate(),
-    {
-      redemptions: redemptions.docs.map((deal) => deal.id),  
-      calculatedBalance,
-      manualAdjustment,
-      totalBalance,
-    }
-  );
-
-  // Create billing
-  const billingDoc = await addDoc(collection(db, "Billings"), billing).catch((err) => {
-    return response.status(500).json({ message: "Error al crear la facturación." });
+  // Update Billing
+  const updateObject = {
+    ...(!isNaN(paidQuantity)) && {paidQuantity},
+    ...(!isNaN(manualAdjustment)) && {manualAdjustment},
+    isPaid: isPaid,
+    totalBalance: totalBalance,
+    debtQuantity,
+    calculatedBalance,
+    updatedAt: dayjs().toDate()
+  }
+  console.log(manualAdjustment, updateObject)
+  await updateDoc(doc(db, "Billings", billingId), updateObject).catch((err) => {
+    return response.status(500).json({ message: "Error al actualizar la facturación." });
   });
-  const newBilling = await getDoc(billingDoc).catch((err) => {
+
+  // Get updated Billing
+  const newBilling = await getDoc(doc(db, "Billings", billingId)).catch((err) => {
     return response.status(500).json({ message: "Error al obtener la facturación." });
   });
 
@@ -607,8 +608,9 @@ exports.updateBilling = async (request, response) => {
     ...newBilling.data(),
     periodStart: newBilling.get("periodStart").toDate(),
     periodEnd: newBilling.get("periodEnd").toDate(),
-    createdAt: newBilling.get("createdAt").toDate()
-  }*/
+    createdAt: newBilling.get("createdAt").toDate(),
+    updatedAt: newBilling.get("updatedAt").toDate()
+  });
 };
 exports.exportsPartnerBillings = async (request, response) => {
   const restaurantId = request.params.restaurantId;
@@ -994,6 +996,46 @@ exports.exportsPartnerBillings2 = async (request, response) => {
   stringifier.pipe(response);
   stringifier.end();
 }
+exports.searchRestaurantsBillings = async (request, response) => {
+  const searchResults = await getRestaurantsList(
+    request.body
+  ).catch((err) => {
+    console.error(err);
+    return response.status(500).json({
+      ...err,
+      message: 'Error al obtener los restaurantes.',
+    });
+  });
+
+  // Early return if there are no results
+  if(!searchResults.hits.length) {
+    return response.status(204).json([]);
+  }
+
+  // Format restaurant docs
+  let docs = searchResults.hits;
+  let restaurantBillings = [];
+  for (let doc of docs) {
+    //
+    const billings = await getRestaurantBilling(
+      doc.id,
+      {
+        periodStart: request.query.periodStart,
+        periodEnd: request.query.periodEnd,
+        manualAdjustment: request.query.manualAdjustment
+      }
+    ).catch((err) => {
+      console.log(err)
+      return response.status(500).json({ message: err.message });
+    });
+
+    // Add restaurant billing to array
+    restaurantBillings.push(...billings);
+  }
+
+  // Return
+  return response.json(restaurantBillings);
+}
 
 //
 exports.syncAuthToFirestoreUsers = async (req, res) => {
@@ -1051,6 +1093,7 @@ exports.formatRedemptions = async (request, response) => {
 
   return response.status(200);
 }
+
 exports.billingsPast = async (request, response) => {
   const initialMonth = 6;
   const restaurants = await getDocs(collection(db, "Restaurants"));
@@ -1060,16 +1103,35 @@ exports.billingsPast = async (request, response) => {
     // Loop through months sequentially
     for(let currentMonth = initialMonth; currentMonth < dayjs().get('month'); currentMonth++) {
       const currentPeriod = dayjs().set('month', currentMonth);
-      const periodStart = currentPeriod.startOf('month');
-      const periodEnd = currentPeriod.endOf('month');
+      const periodStart = currentPeriod.startOf('month').toDate();
+      const periodEnd = currentPeriod.endOf('month').toDate();
       
       // Create billing for corresponding period
       await createRestaurantBilling(restaurant.id, periodStart, periodEnd)
         .catch((err) => { 
+          console.log(err)
           return response.status(500).json({ message: err.message });
          });
     }
   }
 
   return response.json({message: 'Done'});
+}
+exports.createLastMonthBillings = async (context) => {
+  const periodStart = dayjs().subtract(1, 'month').startOf('month').toDate();
+  const periodEnd = dayjs(periodStart).endOf('month').toDate();
+  const restaurants = await getDocs(collection(db, "Restaurants"));
+
+  // Loop through restaurants
+  for(const restaurant of restaurants.docs) {
+    // Create billing for corresponding period
+    await createRestaurantBilling(restaurant.id, periodStart, periodEnd)
+      .catch((err) => { 
+        console.log(err);
+        throw new Error('Error al crear la factura.');
+      });
+  }
+
+  console.log('restaurant.id', periodStart, periodEnd)
+  return null;
 }
