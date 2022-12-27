@@ -126,7 +126,9 @@ const {
   formatRedemptions,
   billingsPast,
   exportsPartnerBillings,
-  exportsPartnerBillingDetails
+  exportsPartnerBillingDetails,
+  searchRestaurantsBillings,
+  createLastMonthBillings
 } = require("./APIs/admin");
 
 
@@ -207,7 +209,7 @@ app.delete("/favorites/:restaurantId", isAuthenticated, removeFavorite);
 app.post("/search/:indexName/query", searchRestaurants);
 
 // Admin
-app.get("/admin/restaurants", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), getAdminRestaurants);
+app.post("/admin/restaurants", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), getAdminRestaurants);
 app.post("/admin/redemptions", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), formatRedemptions);
 app.post("/admin/billings-past", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), billingsPast);
 app.post("/admin/billing", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), createBilling);
@@ -215,8 +217,10 @@ app.get("/admin/billings/restaurant/:restaurantId", isAuthenticated, isAuthoriza
 app.put("/admin/billing/:billingId", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), updateBilling);
 app.get("/admin/billings/export/:restaurantId", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), exportsPartnerBillings);
 app.get("/admin/billings/details/export/:restaurantId", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), exportsPartnerBillingDetails);
+app.post("/admin/billings/search", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), searchRestaurantsBillings);
 app.post("/admin/setUserRole", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), setUserRole);
 app.post("/admin/syncAuthToFirestoreUsers", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.SUPER_ADMIN] }), syncAuthToFirestoreUsers);
+app.post("/admin/createLastMonth", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.SUPER_ADMIN] }), createLastMonthBillings);
 
 // Utils
 app.post("/import/restaurants", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.SUPER_ADMIN] }), importRestaurants);
@@ -248,6 +252,11 @@ exports.updateReservationStatus = functions.pubsub
   .schedule("*/15 * * * *")
   .timeZone("America/Mexico_City")
   .onRun(updateReservationStatus);
+
+exports.createBillings = functions.pubsub
+  .schedule("45 23 25 12 *")
+  .timeZone("America/Mexico_City")
+  .onRun(createLastMonthBillings);
 
 
 ////////////////////////////////////////
@@ -305,7 +314,7 @@ exports.updateReservationStatus = functions.pubsub
 
       // Verify that the restaurant is active.
       // Otherwise, delete it from algolia index
-      if(!shouldPublishRestaurant(restaurant)){
+      /* if(!shouldPublishRestaurant(restaurant)){
         await algoliaIndex.deleteObject(restaurant.id)
           .then((response) => {
             console.log("Document removed from Algolia", response);
@@ -317,7 +326,7 @@ exports.updateReservationStatus = functions.pubsub
         
         //
         return process.exit(0);
-      }
+      } */
       
       // Verify if restaurant has active deals
       let hasDeals = false;
