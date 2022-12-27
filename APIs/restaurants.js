@@ -681,7 +681,8 @@ exports.searchRestaurants = async (request, response) => {
     filters: userParamFilters,
     ...params
   } = request.body;
-  const filters =  userParamFilters;
+  const fixedFilters = `(active:true AND isApproved:true AND hasMinimumRequirements:true)`;
+  let filters = userParamFilters && userParamFilters !== "" ? `${userParamFilters} AND ${fixedFilters}` : fixedFilters;
   
   // Validate Limit param
   let hitsPerPage = SEARCH_CONFIG.MAX_SEARCH_RESULTS_HITS;
@@ -696,9 +697,9 @@ exports.searchRestaurants = async (request, response) => {
 
   let page = SEARCH_CONFIG.DEFAULT_PAGE;
   if (userParamPage && parseInt(userParamPage)) {
-    page = userParamPage;
+    aroundRadius = userParamPage;
   }
-
+  
   // Query Algolia
   const queryResponse = await algoliaIndex
     .search(searchQuery, {
@@ -722,63 +723,66 @@ exports.searchRestaurants = async (request, response) => {
   }
 
   // Parse results before returning
-  if (queryResponse.hits.length) {
-    let hits = queryResponse.hits;
-    let results = [];
+  if (!queryResponse.hits.length) {
+    return response.status(204).json([]);
+  }
 
-    // Get current user state
-    const currentUser = await getCurrentUser(request, response).catch((err) => {
-      console.log(err);
-    });
-    let favoritesCollection = undefined;
-    if (currentUser) {
-      favoritesCollection = await getDocs(
-        query(
-          collection(db, `UserFavorites`),
-          where("userId", "==", currentUser.uid)
-        )
-      ).catch((err) => {
-        console.error(err);
-        return;
-      });
-    }
 
-    // Configure each item
-    for (let doc of hits) {
-      // Get user 'favorites' if logged in
-      let isFavorite = false;
-      if (favoritesCollection) {
-        // Is 'favorite' of the user
-        favoritesCollection.forEach((favorite) => {
-          if (favorite.data().restaurantId == doc.objectID) {
-            isFavorite = true;
-          }
-        });
-      }
+  let hits = queryResponse.hits;
+  let results = [];
 
-      // Format deals list
-      const deals = doc.deals.map((deal) => {
-        return {
-          ...deal,
-          createdAt: Timestamp.fromMillis(deal.createdAt._seconds * 1000).toDate(),
-          startsAt: Timestamp.fromMillis(deal.startsAt._seconds * 1000).toDate(),
-          expiresAt: Timestamp.fromMillis(deal.expiresAt._seconds * 1000).toDate(),
-        };
-      });
-
-      // Return restaurant object
-      results.push({
-        ...doc,
-        id: doc.objectID,
-        isFavorite,
-        deals
-      });
-    }
-
-    //
-    return response.json({
-      ...queryResponse,
-      hits: results,
+  // Get current user state
+  const currentUser = await getCurrentUser(request, response).catch((err) => {
+    console.log(err);
+  });
+  let favoritesCollection = undefined;
+  if (currentUser) {
+    favoritesCollection = await getDocs(
+      query(
+        collection(db, `UserFavorites`),
+        where("userId", "==", currentUser.uid)
+      )
+    ).catch((err) => {
+      console.error(err);
+      return;
     });
   }
+
+  // Configure each item
+  for (let doc of hits) {
+    // Get user 'favorites' if logged in
+    let isFavorite = false;
+    if (favoritesCollection) {
+      // Is 'favorite' of the user
+      favoritesCollection.forEach((favorite) => {
+        if (favorite.data().restaurantId == doc.objectID) {
+          isFavorite = true;
+        }
+      });
+    }
+
+    // Format deals list
+    const deals = doc.deals.map((deal) => {
+      return {
+        ...deal,
+        createdAt: Timestamp.fromMillis(deal.createdAt._seconds * 1000).toDate(),
+        startsAt: Timestamp.fromMillis(deal.startsAt._seconds * 1000).toDate(),
+        expiresAt: Timestamp.fromMillis(deal.expiresAt._seconds * 1000).toDate(),
+      };
+    });
+
+    // Return restaurant object
+    results.push({
+      ...doc,
+      id: doc.objectID,
+      isFavorite,
+      deals
+    });
+  }
+
+  //
+  return response.json({
+    ...queryResponse,
+    hits: results,
+  });
 };
