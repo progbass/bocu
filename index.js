@@ -410,14 +410,14 @@ exports.createBillings = functions.pubsub
         deals = [...restaurant.deals]
       }
 
-      // add deal
+      // add deal to list
       deals = [...deals, {
         ...deal,
         id: snap.id,
         dealType: deal.dealType
       }];
 
-      // create deal object
+      // create restaurant object
       const restaurantUpdate = {
         objectID: deal.restaurantId,
         deals,
