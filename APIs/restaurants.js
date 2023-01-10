@@ -30,6 +30,7 @@ const { uploadFiletoBucket } = require("../utils/upload-utils");
 const { isDealActive, isDealValid } = require("../utils/deals-utils");
 const getCurrentUser = require("../utils/getCurrentUser");
 const algoliasearch = require("algoliasearch");
+const dayjs = require("dayjs");
 
 // Config Algolia SDK
 const algoliaClient = algoliasearch(
@@ -180,6 +181,7 @@ exports.getRestaurant = async (request, response) => {
       rating,
       deals,
       isFavorite,
+      createdAt: dayjs(restaurant.data().createdAt.seconds)
     });
   } catch (err) {
     console.error(err);
@@ -471,6 +473,7 @@ exports.createRestaurant = async (request, response) => {
   }
 };
 
+// DEALS
 exports.getRestaurantDeal = async (request, response) => {
   // Validate that restaurantId exists.
   if (!request.params.restaurantId) {
