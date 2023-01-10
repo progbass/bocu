@@ -33,6 +33,7 @@ const {
 const {
   DEAL_EXPIRY_DEFAULT_OFFSET_HOURS,
   DEAL_TYPE,
+  DEAL_FREQUENCY_TYPE,
   isDealValid,
   isDealActive,
 } = require("../utils/deals-utils");
@@ -279,11 +280,22 @@ exports.createDeal = async (request, response) => {
     : createdAt;
   const startsAt = startTimeParts;
 
+  // Recurrence
+  const isRecurrent = request.body.isRecurrent != undefined 
+    ? Boolean(request.body.isRecurrent) 
+    : false;
+  const recurrenceType = isRecurrent
+    ? DEAL_FREQUENCY_TYPE.RECURRENT 
+    : DEAL_FREQUENCY_TYPE.ONE_USE;
+
   // Create deal.
   let newDealItem = {
     userId: request.user.uid,
     restaurantId: request.params.restaurantId,
     dealType: Number(request.body.dealType),
+    isRecurrent: isRecurrent,
+    recurrenceType: recurrenceType,
+    recurrenceSchedules: request.body.recurrenceSchedules || [],
     details: request.body.details ? request.body.details : "",
     discount: request.body.discount > 0 ? request.body.discount : 0,
     createdAt: new Timestamp(createdAt.unix()),
@@ -293,7 +305,7 @@ exports.createDeal = async (request, response) => {
     useCount: 0,
     useMax: Number(request.body.useMax),
     active: true,
-    terms: request.body.terms ? request.body.terms : "",
+    terms: request.body.terms ? request.body.terms : ""
   };
 
   // Get restaurant
@@ -348,11 +360,24 @@ exports.getDeals = async (request, response) => {
   const filtersList = [where("restaurantId", "==", request.params.restaurantId)];
 
   // Filter by 'active' state (true by default)
-  const filterActiveIsSet = request.query?.active !== undefined;
+  const isFilterActiveSet = request.query?.active !== undefined;
   let filterByActive =
-    filterActiveIsSet && request.query?.active == "false" ? false : true;
-  if (filterActiveIsSet) {
+    isFilterActiveSet && request.query?.active == "false" ? false : true;
+  if (isFilterActiveSet) {
     filtersList.push(where("active", "==", filterByActive));
+  }
+
+  // Filter by 'recurrenceType'
+  let filterByRecurrenceType = request.query?.recurrence;
+  if (filterByRecurrenceType) {
+    switch (filterByRecurrenceType) {
+      case DEAL_FREQUENCY_TYPE.ONE_USE.toLocaleLowerCase():
+        filtersList.push(where("recurrenceType", "==", DEAL_FREQUENCY_TYPE.ONE_USE));
+        break;
+      case DEAL_FREQUENCY_TYPE.RECURRENT.toLocaleLowerCase():
+        filtersList.push(where("recurrenceType", "==", DEAL_FREQUENCY_TYPE.RECURRENT));
+        break;
+    }
   }
 
   // Filter by date range
@@ -380,11 +405,6 @@ exports.getDeals = async (request, response) => {
     // orderBy(request.params.o || 'createdAt', 'desc'),
     limit(LISTING_CONFIG.MAX_LIMIT)
   );
-
-  // Get the last visible document
-  // const documentSnapshots = await getDocs(collectionQuery);
-  // const lastVisible = documentSnapshots.docs[documentSnapshots.docs.length-1];
-
   // collectionQuery = query(
   //   collection(db, `Deals`),
   //   ...filtersList,
@@ -392,50 +412,49 @@ exports.getDeals = async (request, response) => {
   //   startAt(lastVisible),
   //   limit(PAGINATION_CONFIG.LIMIT)
   // );
-
   const dealsList = await getDocs(collectionQuery);
 
-  // Response
-  if (dealsList.size > 0) {
-    let deals = [];
-
-    for (const deal of dealsList.docs) {
-      // Get deal's restaurant
-      const restaurant = await getDoc(
-        doc(db, `Restaurants/${deal.get("restaurantId")}`)
-      ).catch((err) => {
-        console.error(err);
-        return response.status(500).json({
-          ...err,
-          message: "No se encontró el restaurante.",
-        });
-      });
-
-      // Filter Out Deals that are not valid
-      if (!isDealValid(deal.data())) {
-        continue;
-      }
-
-      // Filter out deals that are not active
-      if (filterByActive && !isDealActive(deal.data())) {
-        continue;
-      }
-
-      // Return deals
-      deals.push({
-        ...deal.data(),
-        restaurant: restaurant.get("name"),
-        id: deal.id,
-        startsAt: deal.data().startsAt.toDate(),
-        expiresAt: deal.data().expiresAt.toDate(),
-        createdAt: deal.data().createdAt.toDate(),
-      });
-    }
-
-    return response.json(deals);
-  } else {
+  // Early return if no deals found
+  if (!dealsList.size) {
     return response.json([]);
   }
+
+  // Format deals
+  let deals = [];
+  for (const deal of dealsList.docs) {
+    // Get deal's restaurant
+    const restaurant = await getDoc(
+      doc(db, `Restaurants/${deal.get("restaurantId")}`)
+    ).catch((err) => {
+      console.error(err);
+      return response.status(500).json({
+        ...err,
+        message: "No se encontró el restaurante.",
+      });
+    });
+
+    // Filter Out Deals that are not valid
+    if (!isDealValid(deal.data())) {
+      continue;
+    }
+
+    // Filter out deals that are not active
+    if (filterByActive && !isDealActive(deal.data())) {
+      continue;
+    }
+
+    // Return deals
+    deals.push({
+      ...deal.data(),
+      restaurant: restaurant.get("name"),
+      id: deal.id,
+      startsAt: deal.data().startsAt.toDate(),
+      expiresAt: deal.data().expiresAt.toDate(),
+      createdAt: deal.data().createdAt.toDate(),
+    });
+  }
+
+  return response.json(deals);
 };
 exports.getDeal = async (request, response) => {
   const docSnap = await getDoc(doc(db, `Deals/${request.params.dealId}`)).catch(
