@@ -37,7 +37,7 @@ exports.createReservation = async (request, response) => {
         // Get collection
         const reservationsCollection = collection(db, 'Reservations');
 
-        // Get active deals from current user that match the same restaurant.
+        // Try to get a previous reservation from current user linked to the same deal.
         let userReservations = await getDocs(query(
             collection(db, 'Reservations'),
             where('active', '==', true),
@@ -47,7 +47,7 @@ exports.createReservation = async (request, response) => {
         ));
         let reservation;
 
-        // No more than 1 reservation for the same deal per user.
+        // Users are not allowed to have more than 1 reservation for the same deal.
         if(userReservations.size > 0){
             return response.status(400).json({
                 message: 'Ya cuentas con una reservación para esta oferta.'
@@ -61,7 +61,7 @@ exports.createReservation = async (request, response) => {
             })
         }
 
-        // Get related deal
+        // Get deal
         const dealPath = `Deals/${request.body.dealId}`;
         const dealRef = doc(db, `Deals/`, request.body.dealId);
         let deal = await getDoc(dealRef);
@@ -88,10 +88,45 @@ exports.createReservation = async (request, response) => {
                 message: 'La oferta ha sido desactivada.'
             }) 
         }
-        if(dayjs(newReservation.reservationDate).isAfter(deal.get('expiresAt').toDate())){
-            return response.status(400).json({
-                message: 'No se puede realizar una reservación. La oferta ha expirado.'
-            }) 
+
+        if(!deal.get('isRecurrent')){
+            if(dayjs(newReservation.reservationDate).isAfter(deal.get('expiresAt').toDate())){
+                return response.status(400).json({
+                    message: 'No se puede realizar una reservación. La oferta ha expirado.'
+                }) 
+            }
+        } else {
+            // Get deal's recurrent schedules
+            const recurrenceSchedules = deal.get('recurrenceSchedules') || [];
+
+            // Check if reservation date is within a valid schedule
+            const reservationWeekday = dayjs(newReservation.reservationDate).format('dddd').toLocaleLowerCase();
+            const isValidWeekday = recurrenceSchedules.find(schedule => schedule.daySlug === reservationWeekday);
+            if(!isValidWeekday){
+                return response.status(400).json({
+                    message: 'No se puede realizar una reservación. La oferta no es válidad para este día.'
+                })
+            }
+
+            // Check if reservation schedule is within a valid time range
+            const startTimeToday = dayjs()
+                .set('hour', dayjs(deal.get('startsAt').toDate()).get('hour'))
+                .set('minute', dayjs(deal.get('startsAt').toDate()).get('minute'));
+            const expireTimeToday = dayjs()
+                .set('hour', dayjs(deal.get('expiresAt').toDate()).get('hour'))
+                .set('minute', dayjs(deal.get('expiresAt').toDate()).get('minute'));
+            console.log(expireTimeToday.format('dddd HH:mm'), dayjs(newReservation.reservationDate).format('dddd HH:mm'))
+
+            if(dayjs(newReservation.reservationDate).isBefore(startTimeToday)){
+                return response.status(400).json({
+                    message: 'No se puede realizar una reservación antes del horario de la oferta.'
+                }) 
+            }
+            if(dayjs(newReservation.reservationDate).isAfter(expireTimeToday)){
+                return response.status(400).json({
+                    message: 'No se puede realizar una reservación después del horario de la oferta.'
+                }) 
+            }
         }
 
         // Update deal use count
