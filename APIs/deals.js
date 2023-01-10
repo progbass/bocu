@@ -19,7 +19,10 @@ const {
   DEFAULT_TAKE_RATE, 
   RESERVATION_TOLERANCE_MINUTES 
 } = require("../utils/app-config");
-const { isDealValid, doesDealHasRedemptionUsage } = require("../utils/deals-utils");
+const { 
+  isDealValid, 
+  doesDealHasRedemptionUsage
+} = require("../utils/deals-utils");
 const {
   RESERVATION_STATUS,
   isReservationActive,
