@@ -8,13 +8,14 @@ exports.updateDealStatus = async () => {
     const now = dayjs();
 
     // Get expired deals
-    const dealsCollectionRef = adminDb.collection('Deals')
-        .where('expiresAt', '<', Timestamp.fromDate(now.toDate()))
-        .where('active', '==', true);
-    const dealsCollection = await dealsCollectionRef.get();
+    const dealsExpiredCollection = adminDb.collection('Deals')
+        .where('active', '==', true)
+        .where('isRecurrent', '==', false)
+        .where('expiresAt', '<', Timestamp.fromDate(now.toDate()));
+    const dealsExpired = await dealsExpiredCollection.get();
     
     // update deal status
-    let docs = dealsCollection.docs;
+    let docs = dealsExpired.docs;
     for (let doc of docs) {
         await doc.ref.update({active: false});
     }
