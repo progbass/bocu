@@ -389,7 +389,7 @@ exports.getUserReservations = async (request, response) => {
         checkIn: reservation.checkIn ? dayjs(reservation.checkIn).toDate() : null,
         createdAt: reservation.createdAt.toDate(),
         reservationDate: reservation.reservationDate.toDate(),
-        restaurantName: restaurant.data(),
+        restaurantName: restaurant.get('name'),
         dealType: deal.data().dealType,
         dealDetails,
         dealTerms: deal.data().terms ? deal.data().terms : '',
@@ -464,7 +464,3 @@ exports.redeemDeal = (request, response) => {
       return response.status(500).json({ ...err, message: 'Ocurrió un error al redimir la oferta.' });
     });
 };
-
-//
-
-
