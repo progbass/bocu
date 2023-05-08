@@ -153,13 +153,6 @@ const getRestaurantsList = async (config = {}) => {
   }
 
   // Get restaurants
-  console.log({
-    //...userParams,
-    filters,
-    page,
-    aroundRadius,
-    hitsPerPage,
-  })
   const searchResults = await algoliaIndex
   .search(searchQuery, {
     //...userParams,
@@ -175,11 +168,17 @@ const getRestaurantsList = async (config = {}) => {
   let docs = searchResults.hits;
   let restaurants = [];
   for (let doc of docs) {
+    // Exlude restaurants without ID (invalid)
+    const restaurantId = doc.id || doc.objectID || undefined;
+    if(!restaurantId ){
+      continue
+    }
+
     // Get restaurant ratings
     const raitingRef = await getDocs(
       query(
         collection(db, `RestaurantRatings`),
-        where("restaurantId", "==", doc.id)
+        where("restaurantId", "==", restaurantId)
       )
     ).catch((err) => {
       console.error(err);
@@ -227,6 +226,7 @@ const getRestaurantsList = async (config = {}) => {
       rating = `${rating} (${ratingCount})`;
     }
 
+
     // Return restaurant object
     restaurants.push({
       ...doc,
@@ -251,6 +251,7 @@ exports.getAdminRestaurants = async (request, response) => {
       message: 'Error al obtener los restaurantes.',
     });
   });
+  
 
   // Early return if there are no results
   if(!searchResults.hits.length) {
@@ -387,9 +388,11 @@ const createRestaurantBilling = async (restaurantId, periodStart, periodEnd, man
 
   // Create billing
   const billingDoc = await addDoc(collection(db, "Billings"), billing).catch((err) => {
+    console.log(err)
     throw new Error("Error al crear la facturación.");
   });
   const newBilling = await getDoc(billingDoc).catch((err) => {
+    console.log(err)
     throw new Error("Error al obtener la facturación.");
   });
 
@@ -1009,7 +1012,7 @@ exports.searchRestaurantsBillings = async (request, response) => {
 
   // Early return if there are no results
   if(!searchResults.hits.length) {
-    return response.status(204).json([]);
+    return response.status(200).json([]);
   }
 
   // Format restaurant docs
