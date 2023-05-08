@@ -12,6 +12,7 @@ const { db, adminDb } = require('./utils/admin');
 const { USER_ROLES } = require('./utils/app-config');
 const { isAuthenticated, isAuthorizated } = require("./utils/auth");
 const { RESERVATION_STATUS } = require('./utils/reservations-utils');
+const { syncRestaurantActiveDealsList } = require('./APIs/partners');
 const {
   shouldPublishRestaurant
 } = require("./utils/restaurant-utils");
@@ -65,10 +66,13 @@ const {
   createDeal,
   updateDeal,
   deleteDeal,
+  getUniqueDealsByRedemptions,
 
   getReservationsList,
   getPartnerCurrentBalance,
+  getPartnerBalanceHistory,
   getPartnerBillings,
+  getPartnerBillingsDetails,
 
   createQR,
 
@@ -163,6 +167,7 @@ app.get("/partner/restaurant/:restaurantId", isAuthenticated, getPartnerRestaura
 app.delete("/partner/restaurant/:restaurantId", isAuthenticated, deactivatePartnerRestaurant);
 app.put("/partner/restaurant/:restaurantId", isAuthenticated, editPartnerRestaurant);
 app.get("/partner/restaurant/:restaurantId/deals", isAuthenticated, getDeals);
+app.get("/partner/restaurant/:restaurantId/deals/redemptions", isAuthenticated, getUniqueDealsByRedemptions);
 app.get("/partner/restaurant/:restaurantId/deal/:dealId", isAuthenticated, getDeal);
 app.put("/partner/restaurant/:restaurantId/deal/:dealId", isAuthenticated, updateDeal);
 app.delete("/partner/restaurant/:restaurantId/deal/:dealId", isAuthenticated, deleteDeal);
@@ -173,8 +178,8 @@ app.post("/partner/restaurant/:restaurantId/menu", isAuthenticated, postRestaura
 app.post("/partner/restaurant/:restaurantId/image", isAuthenticated, uploadRestaurantProfilePhoto);
 app.get("/partner/restaurant/:restaurantId/photos", getRestaurantGallery);
 app.get("/partner/restaurant/:restaurantId/balance", isAuthenticated, getPartnerCurrentBalance );
+app.get("/partner/restaurant/:restaurantId/balance/history", isAuthenticated, getPartnerBalanceHistory );
 app.get("/partner/restaurant/:restaurantId/billings", isAuthenticated, getPartnerBillings);
-
 
 app.get("/categories", getCategories);
 app.post("/categories", isAuthenticated, createCategory);
@@ -225,7 +230,7 @@ app.post("/admin/createLastMonth", isAuthenticated, isAuthorizated({ hasRole: [U
 // Utils
 app.post("/import/restaurants", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.SUPER_ADMIN] }), importRestaurants);
 app.put("/update/restaurants", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.SUPER_ADMIN] }), updateAllRestaurants);
-//app.post('/deals/deleteAllDeals', isAuthenticated, deleteAllDeals); // <------ DAnGEROUS UTILITY
+// app.post('/deals/deleteAllDeals', isAuthenticated, deleteAllDeals); // <------ DAnGEROUS UTILITY
 // app.get('/deals-status', isAuthenticated, updateDealStatus) // <-- UTILITY
 // app.get('/reservation-status', isAuthenticated, updateReservationStatus); // <-- UTILITY
 
@@ -243,7 +248,7 @@ exports.api = functions.https.onRequest(app);
 ////////////////////////////////////////
 // CronJobs
 exports.updateDealStatus = functions.pubsub
-  .schedule("*/15 * * * *")
+  .schedule("*/10 * * * *")
   .timeZone("America/Mexico_City")
   .onRun(updateDealStatus);
 
@@ -254,7 +259,7 @@ exports.updateReservationStatus = functions.pubsub
   .onRun(updateReservationStatus);
 
 exports.createBillings = functions.pubsub
-  .schedule("45 23 25 12 *")
+  .schedule("*/05 * * * *")
   .timeZone("America/Mexico_City")
   .onRun(createLastMonthBillings);
 
@@ -279,7 +284,7 @@ exports.createBillings = functions.pubsub
     });
   exports.onCreateRestaurant = functions.firestore
     .document("Restaurants/{restaurantId}")
-    .onCreate(async (snap, context) => {
+    .onCreate(async (snap) => {
       const restaurant = snap.data();
       // const newRestaurant = {
       //   objectID: snap.id,
@@ -307,40 +312,36 @@ exports.createBillings = functions.pubsub
 
   exports.onUpdateRestaurant = functions.firestore
     .document("Restaurants/{restaurantId}")
-    .onUpdate(async (snap, context) => {
+    .onUpdate(async (snap) => {
+      const restaurantId = snap.after.id;
       const { location, ...restaurant } = snap.after.data();
-      const hasPhoto = Boolean(restaurant.photo && restaurant.photo !== '');
-      const hasAvatar = Boolean(restaurant.avatar && restaurant.avatar !== '');
-
-      // Verify that the restaurant is active.
-      // Otherwise, delete it from algolia index
-      /* if(!shouldPublishRestaurant(restaurant)){
-        await algoliaIndex.deleteObject(restaurant.id)
-          .then((response) => {
-            console.log("Document removed from Algolia", response);
-          })
-          .catch((error) => {
-            console.error("Error when deleting the document in Algolia", error);
-            process.exit(1);
-          });
-        
-        //
-        return process.exit(0);
-      } */
+      const hasPhoto = Boolean(restaurant?.photo && restaurant?.photo !== '');
+      const hasAvatar = Boolean(restaurant?.avatar && restaurant?.avatar !== '');
       
-      // Verify if restaurant has active deals
-      let hasDeals = false;
-      const dealsList = await getDocs(query(
-        collection(db, 'Deals'),
-        where('restaurantId', '==', restaurant.id),
-        where('status', '==', true)
-      ));
-      if(dealsList.size){
-        hasDeals = true;
-      }
+      // Format deals
+      let dealsStartsDates = [];
+      const deals = restaurant.deals ? restaurant.deals.map((deal) => {
+        dealsStartsDates.push(dayjs(deal.startsAt.toDate()).unix());
+        return {
+          ...deal,
+          recurrenceSchedules: deal.recurrenceSchedules.map(schedule => {
+            return {
+              ...schedule,
+              startsAt: dayjs(deal.startsAt.toDate()).unix(),
+              expiresAt: dayjs(deal.expiresAt.toDate()).unix(),
+            }
+          }),
+          startsAt: dayjs(deal.startsAt.toDate()).unix(),
+          expiresAt: dayjs(deal.expiresAt.toDate()).unix(),
+          createdAt: dayjs(deal.createdAt.toDate()).unix(),
+        }
+      }) : [];
+      dealsStartsDates = dealsStartsDates.sort((a, b) => {return a-b});
+      dealsStartsDates = dealsStartsDates.slice(0, 1)
+      const hasDeals = deals.length > 0;
 
       // Geolocation
-      if(parseFloat(location.longitude) && parseFloat(location.latitude)){
+      if(parseFloat(location?.longitude) && parseFloat(location?.latitude)){
         restaurant._geoloc = {
           lng: parseFloat(location.longitude),
           lat: parseFloat(location.latitude)
@@ -356,26 +357,28 @@ exports.createBillings = functions.pubsub
         hasPhoto: hasPhoto,
         hasAvatar: hasAvatar,
         hasDeals,
-        objectID: restaurant.id
+        deals,
+        dealsStartsDates,
+        id: restaurantId,
+        objectID: restaurantId
       };
 
       // // Add or update new objects
-      algoliaIndex
+      await algoliaIndex
         .partialUpdateObject(updatedRestaurant, {
           createIfNotExists: true
-        })
-        .then(() => {
-          console.log("Document updated in Algolia");
-          process.exit(0);
-        })
-        .catch((error) => {
+        }).catch((error) => {
           console.error("Error when updating the document in Algolia", error);
           process.exit(1);
         });
+
+      // 
+      console.log("Finished updating restuarant.");
+      return
     });
   exports.onDeleteRestaurant = functions.firestore
     .document("Restaurants/{restaurantId}")
-    .onDelete(async (snap, context) => {
+    .onDelete(async (snap) => {
       // Add or update new objects
       algoliaIndex
         .deleteObject(snap.id)
@@ -392,154 +395,126 @@ exports.createBillings = functions.pubsub
   // Deals Events
   exports.onCreateDeal = functions.firestore
     .document("Deals/{dealId}")
-    .onCreate(async (snap, context) => {
+    .onCreate(async (snap) => {
       const deal = snap.data();
 
-      // verify if deal is active
-      if(!deal.active){
-        console.log("Deal is not active");
-        process.exit(0);
-      }
-
-      // Get current indexed deals
-      const restaurant = await algoliaIndex.getObject(deal.restaurantId, {
-        attributesToRetrieve: ['deals']
-      });
+      // Sync restaurant deals list
       let deals = [];
-      if(restaurant.deals){
-        deals = [...restaurant.deals]
+      deals = await syncRestaurantActiveDealsList(deal.restaurantId)
+      .catch((err) => {
+        deals = [];
+        console.error("Error al actualizar la el restaurante.", err);
+        // process.exit(1);
+      });
+      if(deal.active){
+        deals.push(deal);
       }
 
-      // add deal to list
-      deals = [...deals, {
-        ...deal,
-        id: snap.id,
-        dealType: deal.dealType
-      }];
-
+      /*
       // create restaurant object
       const restaurantUpdate = {
         objectID: deal.restaurantId,
-        deals,
-        hasDeals: true
+        id: deal.restaurantId,
+        deals: deals.map((deal) => {
+          return {
+            ...deal,
+            recurrenceSchedules: deal.recurrenceSchedules.map(schedule => {
+              return {
+                ...schedule,
+                startsAt: dayjs(schedule.startsAt).unix(),
+                expiresAt: dayjs(schedule.startsAt).unix(),
+              }
+            }),
+            startsAt: dayjs(deal.startsAt).unix(),
+            expiresAt: dayjs(deal.expiresAt).unix(),
+            createdAt: dayjs(deal.createdAt).unix(),
+          }
+        }),
+        hasDeals: deals.length > 0 ? true : false
       };
 
       // Add or update new objects
-      algoliaIndex
+      await algoliaIndex
         .partialUpdateObject(restaurantUpdate)
         .then(() => {
-          console.log("Documents imported into Algolia");
-          process.exit(0);
         })
         .catch((error) => {
           console.error("Error when importing documents into Algolia", error);
           process.exit(1);
-        });
+        }); */
+      
+      // Finish Process
+      console.log("Finished creating deals.");
+      return
     });
 
   exports.onUpdateDeal = functions.firestore
     .document("Deals/{dealId}")
-    .onUpdate(async (snap, context) => {
+    .onUpdate(async (snap) => {
       const deal = snap.after.data();
 
-      // Cancel all reservations linked to the deal
-      /*
-      if(!deal.active){
-        const reservationsCollection = query(
-          collection(db, 'Reservations'),
-          where('dealId', '==', snap.after.id),
-          where('active', '==', true)
-        );
-        const reservations = await getDocs(reservationsCollection);
-        
-        if(reservations.size){
-          for(const reservation of reservations.docs){
-            await updateDoc(
-              reservation.ref,{
-              active: false,
-              status: RESERVATION_STATUS.DEAL_CANCELED
-            })
-          }
-        }
-      }
-
-      /* ----------- ALGOLIA ----------- */
-      // Get current indexed deals
-      const restaurant = await algoliaIndex.getObject(deal.restaurantId, {
-        attributesToRetrieve: ['deals']
-      });
+      // Sync restaurant deals list
       let deals = [];
-      if(restaurant.deals){
-        deals = [...restaurant.deals]
-      }
-
-      // verify if deals is active
-      if(!deal.active){
-        deals = deals.filter((item) => item.id != snap.after.id)
-      } else {
-        deals = deals.filter((item) => item.id != snap.after.id)
-        deals = [...deals, {
-          id: snap.after.id, 
-          ...deal,
-          dealType: deal.dealType
-        }];
-      }
+      deals = await syncRestaurantActiveDealsList(deal.restaurantId)
+      .catch((err) => {
+        deals = [];
+        console.error("Error al actualizar el restaurante.", err);
+        // process.exit(1);
+      });
       
+
+      /* ----------- ALGOLIA ----------- 
       // create deal object
       const indexUpdate = {
         objectID: deal.restaurantId,
-        deals,
-        hasDeals: deals.length > 0
+        id: deal.restaurantId,
+        deals: deals.map((deal) => {
+          return {
+            ...deal,
+            recurrenceSchedules: deal.recurrenceSchedules.map(schedule => {
+              return {
+                ...schedule,
+                startsAt: dayjs(schedule.startsAt).unix(),
+                expiresAt: dayjs(schedule.startsAt).unix(),
+              }
+            }),
+            startsAt: dayjs(deal.startsAt).unix(),
+            expiresAt: dayjs(deal.expiresAt).unix(),
+            createdAt: dayjs(deal.createdAt).unix(),
+          }
+        }),
+        hasDeals: deals.length > 0 ? true : false
       };
 
       // Add or update new objects
-      algoliaIndex
-        .partialUpdateObject(indexUpdate)
-        .then(() => {
-          console.log("Documents updated into Algolia");
-          process.exit(0);
-        })
-        .catch((error) => {
+      await algoliaIndex
+        .partialUpdateObject(indexUpdate, {
+          createIfNotExists: true
+        }).catch((error) => {
           console.error("Error when updateding documents into Algolia", error);
           process.exit(1);
-        });
+        }); */
+      
+      // Finish process
+      console.log("Finished updating deals.");
+      return
     });
 
   exports.onDeleteDeal = functions.firestore
     .document("Deals/{dealId}")
-    .onDelete(async (snap, context) => {
+    .onDelete(async (snap) => {
       const deal = snap.data();
 
-      // Cancel all reservations linked to the deal
-      /* const reservationsCollection = query(
-        collection(db, 'Reservations'),
-        where('dealId', '==', snap.id),
-        where('active', '==', true)
-      );
-      const reservations = await getDocs(reservationsCollection);
-      
-      if(reservations.size){
-        for(const reservation of reservations.docs){
-          await updateDoc(
-            reservation.ref, {
-            active: false,
-            status: RESERVATION_STATUS.DEAL_CANCELED
-          })
-        }
-      } */
-
-      // Get current indexed deals
-      const restaurant = await algoliaIndex.getObject(deal.restaurantId, {
-        attributesToRetrieve: ['deals']
-      });
+      // Sync restaurant deals list
       let deals = [];
-      if(restaurant.deals){
-        deals = [...restaurant.deals]
-      }
-
-      // remove deal
-      deals = deals.filter((item) => item.id != snap.id);
+      deals = await syncRestaurantActiveDealsList(deal.restaurantId)
+      .catch((err) => {
+        deals = [];
+        console.error("Error al actualizar la el restaurante.", err);
+        // process.exit(1);
+      });
       
+      /*
       // create deal object
       const indexUpdate = {
         objectID: deal.restaurantId,
@@ -557,13 +532,17 @@ exports.createBillings = functions.pubsub
         .catch((error) => {
           console.error("Error when deleting documents from Algolia", error);
           process.exit(1);
-        });
+        }); */
+
+      // Finish process
+      console.log("Finished deleting deals.");
+      return
     });
 
   // Rating Events
   exports.onCreateRating = functions.firestore
     .document("RestaurantRatings/{ratingId}")
-    .onCreate(async (snap, context) => {
+    .onCreate(async (snap) => {
       const ratingObject = snap.data();
 
       // Get collection
@@ -634,7 +613,7 @@ exports.createBillings = functions.pubsub
 
   exports.onUpdateRating = functions.firestore
     .document("RestaurantRatings/{ratingId}")
-    .onUpdate(async (snap, context) => {
+    .onUpdate(async (snap) => {
       const ratingObject = snap.after.data();
 
       // Get collection
@@ -704,7 +683,7 @@ exports.createBillings = functions.pubsub
 
   exports.onDeleteRating = functions.firestore
     .document("RestaurantRatings/{ratingId}")
-    .onDelete(async (snap, context) => {
+    .onDelete(async (snap) => {
       const ratingObject = snap.data();
 
       // Get collection
