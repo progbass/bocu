@@ -5,8 +5,8 @@ const isEmpty = (string) => {
 
 exports.validateLoginData = (data) => {
    let errors = {};
-   if (!data.email || isEmpty(data.email)) errors.email = 'Must not be empty';
-   if (!data.password || isEmpty(data.password)) errors.password = 'Must not be  empty';
+   if (!data.email || isEmpty(data.email)) errors.email = 'Email no puede estar vacío.';
+   if (!data.password || isEmpty(data.password)) errors.password = 'Contraseña no puede estar vacía.';
    return {
        errors,
        valid: Object.keys(errors).length === 0 ? true : false
@@ -23,19 +23,19 @@ exports.validateSignUpData = (data) => {
 	let errors = {};
 
 	if (isEmpty(data.email)) {
-		errors.email = 'Must not be empty';
+		errors.email = 'Email no puede estar vacío.';
 	} else if (!isEmail(data.email)) {
-		errors.email = 'Must be valid email address';
+		errors.email = 'Email inválido.';
 	}
 
-	if (isEmpty(data.firstName)) errors.firstName = 'Must not be empty';
-	if (isEmpty(data.lastName)) errors.lastName = 'Must not be empty';
-	if (isEmpty(data.phoneNumber)) errors.phoneNumber = 'Must not be empty';
-	if (isEmpty(data.country)) errors.country = 'Must not be empty';
+	if (isEmpty(data.firstName)) errors.firstName = 'Nombre no puede estar vacío.';
+	if (isEmpty(data.lastName)) errors.lastName = 'Apellido no puede estar vacío.';
+	if (isEmpty(data.phoneNumber)) errors.phoneNumber = 'Teléfono no puede estar vacío.';
+	if (isEmpty(data.country)) errors.country = 'País no puede estar vacío.';
 
-	if (isEmpty(data.password)) errors.password = 'Must not be empty';
-	if (data.password !== data.confirmPassword) errors.confirmPassword = 'Passowrds must be the same';
-	if (isEmpty(data.username)) errors.username = 'Must not be empty';
+	if (isEmpty(data.password)) errors.password = 'Contraseña no puede estar vacía.';
+	if (data.password !== data.confirmPassword) errors.confirmPassword = 'Las contraseñas no coinciden.';
+	if (isEmpty(data.username)) errors.username = 'Usuario no puede estar vacío.';
 
 	return {
 		errors,
