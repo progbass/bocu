@@ -8,7 +8,6 @@ const {
   collection,
   query,
   where,
-  deleteDoc,
   updateDoc,
   startAfter,
   startAt,
@@ -26,6 +25,10 @@ const os = require("os");
 const fs = require("fs");
 const readXlsxFile = require("read-excel-file/node");
 const dayjs = require("dayjs");
+const utc = require('dayjs/plugin/utc')
+const isBetween = require('dayjs/plugin/isBetween');
+dayjs.extend(isBetween)
+dayjs.extend(utc)
 const {
   RESERVATION_STATUS,
   getReservationStatusDetails,
@@ -36,6 +39,7 @@ const {
   DEAL_FREQUENCY_TYPE,
   isDealValid,
   isDealActive,
+  isDealRecurrent
 } = require("../utils/deals-utils");
 const { getNewRestaurantObject } = require("../utils/restaurant-utils");
 const { uploadFiletoBucket } = require("../utils/upload-utils");
@@ -137,13 +141,13 @@ exports.editPartnerRestaurant = async (request, response) => {
     }
   }
 
-  // Ensure aveerageTicket is a number
+  // Ensure averageTicket is a number
   let averageTicket = restaurant.data().averageTicket;
   if (request.body.averageTicket) {
     averageTicket = parseFloat(averageTicket);
   }
 
-  // Update document.
+  // Update document
   await updateDoc(restaurantReference, {
     ...request.body,
     categories,
@@ -265,174 +269,360 @@ exports.deactivatePartnerRestaurant = async (request, response) => {
 };
 
 // DEALS CRUD
-exports.createDeal = async (request, response) => {
+const createDealObject = async (
+  startDate, 
+  expiryDate, 
+  useMax, 
+  dealType = 1,
+  isRecurrent = false,
+  recurrenceSchedules = [],
+  userId,
+  restaurantId,
+  discount = 0,
+  includeDrinks = false,
+  terms = "",
+  promotionDetails = ""
+) => {
+  // Get restaurant
+  let restaurant = await getDoc(doc(db, "Restaurants", restaurantId))
+    .catch((err) => {
+      console.log(err)
+      throw new Error("Error al obtener el restaurante.");
+    });
+
+  // No restaurant found.
+  if(!restaurant.exists()) {
+    throw new Error("No se encontró el restaurante.");
+  }
+
   // Define expiry date settings
   const createdAt = dayjs();
 
   // Define start and expiry dates
-  let expiryTimeParts = dayjs(request.body.expiresAt).isValid()
-    ? dayjs(request.body.expiresAt)
+  let expiryTimeParts = dayjs(expiryDate).isValid()
+    ? dayjs(expiryDate)
     : createdAt.add(DEAL_EXPIRY_DEFAULT_OFFSET_HOURS, "hour");
   const expiresAt = expiryTimeParts;
 
-  let startTimeParts = dayjs(request.body.startsAt).isValid()
-    ? dayjs(request.body.startsAt)
+  let startTimeParts = dayjs(startDate).isValid()
+    ? dayjs(startDate)
     : createdAt;
   const startsAt = startTimeParts;
 
   // Recurrence
-  const isRecurrent = request.body.isRecurrent != undefined 
-    ? Boolean(request.body.isRecurrent) 
-    : false;
   const recurrenceType = isRecurrent
     ? DEAL_FREQUENCY_TYPE.RECURRENT 
-    : DEAL_FREQUENCY_TYPE.ONE_USE;
+    : DEAL_FREQUENCY_TYPE.SINGLE_DATE;
 
   // Create deal.
   let newDealItem = {
-    userId: request.user.uid,
-    restaurantId: request.params.restaurantId,
-    dealType: Number(request.body.dealType),
+    userId: userId,
+    restaurantId: restaurantId,
+    dealType: dealType,
     isRecurrent: isRecurrent,
     recurrenceType: recurrenceType,
-    recurrenceSchedules: request.body.recurrenceSchedules || [],
-    details: request.body.details ? request.body.details : "",
-    discount: request.body.discount > 0 ? request.body.discount : 0,
-    createdAt: new Timestamp(createdAt.unix()),
-    startsAt: new Timestamp(startsAt.unix()),
-    expiresAt: new Timestamp(expiresAt.unix()),
-    include_drinks: request.body.include_drinks || false,
+    recurrenceSchedules: recurrenceSchedules.map(schedule => {
+      return {
+        ...schedule,
+        startsAt: dayjs(schedule.startsAt).toDate(),
+        expiresAt: dayjs(schedule.expiresAt).toDate()
+      }
+    }) || [],
+    details: promotionDetails,
+    discount: discount,
+    createdAt: dayjs(createdAt).toDate(),
+    startsAt: dayjs(startsAt).toDate(),
+    expiresAt: dayjs(expiresAt).toDate(),
+    include_drinks: includeDrinks,
     useCount: 0,
-    useMax: Number(request.body.useMax),
+    useMax: useMax,
     active: true,
-    terms: request.body.terms ? request.body.terms : ""
+    terms: terms
   };
 
-  // Get restaurant
-  let document = await getDocs(
-    query(
-      collection(db, "Restaurants"),
-      where("userId", "==", request.user.uid)
-    )
-  ).catch((err) => {
-    return response.status(500).json({
-      ...err,
-      message: "Error al obtener el restaurante.",
-    });
-  });
-
-  // No restaurant found.
-  if (document.size < 1) {
-    return response.status(204).json({
-      message: "No se encontró el restaurante.",
-    });
-  }
-
-  // Get latest restaurant.
-  let restaurant = document.docs[document.size - 1];
-  newDealItem = {
-    restaurantId: restaurant.id,
-    ...newDealItem,
-  };
+  return newDealItem;
+}
+exports.createDealObject = createDealObject;
+const createNewDeal = async (
+  startDate, 
+  expiryDate, 
+  useMax, 
+  dealType = 1,
+  isRecurrent = false,
+  recurrenceSchedules = [],
+  userId,
+  restaurantId,
+  discount = 0,
+  includeDrinks = false,
+  terms = "",
+  promotionDetails = ""
+) => {
+  const newDealItem = await createDealObject(
+    startDate, 
+    expiryDate, 
+    useMax, 
+    dealType,
+    isRecurrent,
+    recurrenceSchedules,
+    userId,
+    restaurantId,
+    discount,
+    includeDrinks,
+    terms,
+    promotionDetails,
+  )
 
   // Create deal in the DB.
-  const documentRef = await addDoc(collection(db, "Deals"), newDealItem).catch(
+  let newDeal = await addDoc(collection(db, "Deals"), newDealItem).catch(
     (err) => {
       console.error(err);
-      return response
-        .status(500)
-        .json({ ...err, message: "Error al crear la oferta." });
+      throw new Error("Error al crear la oferta.");
     }
   );
 
   // Return new documento in response.
-  const doc = await getDoc(documentRef);
-  return response.json({
-    ...newDealItem,
-    id: doc.id,
-    startsAt: doc.data().startsAt.toDate(),
-    expiresAt: doc.data().expiresAt.toDate(),
-    createdAt: doc.data().createdAt.toDate(),
+  newDeal = await getDoc(newDeal);
+  const formattedDeal = await getFormattedDeal(newDeal);
+  return formattedDeal;
+}
+exports.createNewDeal = createNewDeal;
+exports.createDeal = async (request, response) => {
+  const isRecurrent = request.body.isRecurrent != undefined 
+    ? Boolean(request.body.isRecurrent) 
+    : false;
+
+  //
+  const newDeal = await createNewDeal(
+    request.body.startsAt,
+    request.body.expiresAt, 
+    Number(request.body.useMax),
+    request.body.dealType,
+    isRecurrent,
+    request.body.recurrenceSchedules,
+    request.user.uid,
+    request.params.restaurantId,
+    Number(request.body.discount),
+    request.body.include_drinks,
+    request.body.terms,
+    request.body.details
+  ).catch(err => {
+    console.log(err);
+    return response.status(500).json({
+      message: err.message,
+    });
   });
+
+  // Return new deal
+  return response.json(newDeal);
 };
-exports.getDeals = async (request, response) => {
+
+const getDatesInRange = (startDate, endDate) => {
+  const dateArray = [];
+  let currentDate = dayjs(startDate);
+  let stopDate = dayjs(endDate);
+
+  //
+  if(stopDate.diff(currentDate, 'day') > 0){
+    while (stopDate.diff(currentDate, 'day') > 0) {
+      dateArray.push(currentDate)
+      currentDate = dayjs(currentDate).add(1, 'day');
+    }
+    return dateArray;
+  }
+  
+  //
+  dateArray.push(currentDate);
+  return [startDate];
+}
+const findNextDateByWeekday = (targetWeekday, date) => {
+  const targetDate = date || dayjs();
+  
+  // If targetDate is the same weekday as targetWeekday,
+  // return current date object.
+  if(targetDate.format('dddd').toLowerCase() == targetWeekday.toLowerCase()){
+    return targetDate;
+  }
+
+  // Recursively call self function until finding target weekday,
+  // by adding one day to the targetDate
+  return findNextDateByWeekday(
+    targetWeekday, 
+    targetDate.add(1, 'd')
+  );
+}
+const getNextValidSchedules = (startsAt, expiresAt) => {
+  const now = dayjs();
+
+  // If current date is after the start date,
+  if(!now.isBetween(startsAt, expiresAt) && now.isAfter(startsAt)){
+    const validityWindowInMinutes = expiresAt.diff(startsAt, 'minute');
+    const nextValidStartDate = findNextDateByWeekday(startsAt.format('dddd'), startsAt)
+      .hour(startsAt.hour())
+      .minute(startsAt.minute())
+      .second(startsAt.second());
+    const nextValidExpiryDate = dayjs(nextValidStartDate).add(validityWindowInMinutes, 'minute');
+
+    //
+    if(!nextValidExpiryDate.isAfter(now)) {
+      const newStartDate = nextValidStartDate.add(1, 'w');
+      const newExpiryDate = dayjs(newStartDate).add(validityWindowInMinutes, 'minute');
+      return getNextValidSchedules(
+        newStartDate, 
+        newExpiryDate
+      );
+    }
+
+    return {
+      nextValidStartDate,
+      nextValidExpiryDate
+    }
+  }
+  
+  //
+  return {
+    nextValidStartDate: startsAt,
+    nextValidExpiryDate: expiresAt
+  }
+} 
+const getDealRedemptions = async (deal) => {
+  // Get Redemptions
+  const dealRedemptions = await getDocs(query(
+    collection(db, "DealRedemptions"),
+    where("dealId", "==", deal.id),
+    orderBy("createdAt", "desc"),
+  )).catch((err) => {
+    console.log(err)
+    throw new Error("Error al obtener las redenciones.");
+  });
+
+  // Early return if no redemptions found.
+  if(dealRedemptions.size < 1){
+    return [];
+  }
+
+  return dealRedemptions.docs;
+}
+exports.getNextValidSchedules = getNextValidSchedules;
+const getFormattedDeal = async (deal) => {
+  
+  // Get deal's restaurant
+  const restaurant = await getDoc(
+    doc(db, `Restaurants/${deal.get("restaurantId")}`)
+  ).catch(() => {
+    throw new Error("No se encontró el restaurante.");
+  });
+
+  // Deal's validity dates
+  let startsAt = dayjs(deal.get("startsAt").toDate());
+  let expiresAt = dayjs(deal.get("expiresAt").toDate());
+  let recurrenceSchedules = deal.data()?.recurrenceSchedules || [];
+  recurrenceSchedules = recurrenceSchedules.map((schedule) => {
+    return {
+      ...schedule,
+      startsAt: dayjs(schedule.startsAt).toDate(),
+      expiresAt: dayjs(schedule.expiresAt).toDate(),
+    }
+  });
+
+  // Check recurrent deal's validity dates
+  if (deal.get("recurrenceType") === DEAL_FREQUENCY_TYPE.RECURRENT) {
+    recurrenceSchedules = recurrenceSchedules.map((schedule) => {
+      // Get next valid dates
+      const newSchedules = getNextValidSchedules(startsAt, expiresAt);
+      startsAt = newSchedules.nextValidStartDate;
+      expiresAt = newSchedules.nextValidExpiryDate;
+      // console.log("> ",  deal.id, startsAt.format('YYYY-MM-DD HH:mm:ss'), expiresAt.format('YYYY-MM-DD HH:mm:ss'))
+      
+      // Return the current schedule.
+      return {
+        ...schedule,
+        startsAt: startsAt.toDate(),
+        expiresAt: expiresAt.toDate(),
+      };
+    })
+  }
+
+  // Return deals
+  return {
+    ...deal.data(),
+    restaurant: restaurant.get("name"),
+    id: deal.id,
+    recurrenceSchedules,
+    startsAt,
+    expiresAt,
+    createdAt: deal.data().createdAt.toDate(),
+  };
+}
+exports.getFormattedDeal = getFormattedDeal;
+const getDealsList = async (restaurantId, queryParams = {}) => {
   // Build query
-  const filtersList = [where("restaurantId", "==", request.params.restaurantId)];
+  const filtersList = [where("restaurantId", "==", restaurantId)];
 
   // Filter by 'active' state (true by default)
-  const isFilterActiveSet = request.query?.active !== undefined;
+  const isFilterActiveSet = queryParams?.active !== undefined;
   let filterByActive =
-    isFilterActiveSet && request.query?.active == "false" ? false : true;
+    isFilterActiveSet && queryParams?.active == "false" ? false : true;
   if (isFilterActiveSet) {
     filtersList.push(where("active", "==", filterByActive));
   }
 
   // Filter by 'recurrenceType'
-  let filterByRecurrenceType = request.query?.recurrence;
+  let filterByRecurrenceType = queryParams?.recurrence;
   if (filterByRecurrenceType) {
     switch (filterByRecurrenceType) {
-      case DEAL_FREQUENCY_TYPE.ONE_USE.toLocaleLowerCase():
-        filtersList.push(where("recurrenceType", "==", DEAL_FREQUENCY_TYPE.ONE_USE));
+      case DEAL_FREQUENCY_TYPE.SINGLE_DATE:
+        // filtersList.push(where("recurrenceType", "==", DEAL_FREQUENCY_TYPE.SINGLE_DATE));
+        filtersList.push(where("recurrenceType", "!=", DEAL_FREQUENCY_TYPE.RECURRENT));
         break;
-      case DEAL_FREQUENCY_TYPE.RECURRENT.toLocaleLowerCase():
+      case DEAL_FREQUENCY_TYPE.RECURRENT:
         filtersList.push(where("recurrenceType", "==", DEAL_FREQUENCY_TYPE.RECURRENT));
         break;
     }
   }
 
   // Filter by date range
-  let range_init = request.query.range_init;
+  let range_init = queryParams?.range_init;
   if (range_init && range_init != "") {
     if (dayjs(range_init).isValid()) {
       range_init = dayjs(dayjs(range_init).toISOString()).toDate();
       filtersList.push(
-        where("createdAt", ">=", Timestamp.fromDate(range_init))
+        where("startsAt", ">=", Timestamp.fromDate(range_init))
       );
     }
   }
-  let range_end = request.query.range_end;
+  let range_end = queryParams?.range_end;
   if (range_end && range_end != "") {
     if (dayjs(range_end).isValid()) {
       range_end = dayjs(range_end).hour(23).minute(59).second(59).toDate();
-      filtersList.push(where("createdAt", "<=", Timestamp.fromDate(range_end)));
+      filtersList.push(where("startsAt", "<=", Timestamp.fromDate(range_end)));
     }
   }
+
+  // Order params
+  const orderField = queryParams?.order || "startsAt";
+  const orderSort = queryParams?.sort || "asc";
 
   // Get collection
   let collectionQuery = query(
     collection(db, `Deals`),
     ...filtersList,
-    // orderBy(request.params.o || 'createdAt', 'desc'),
-    limit(LISTING_CONFIG.MAX_LIMIT)
-  );
-  // collectionQuery = query(
-  //   collection(db, `Deals`),
-  //   ...filtersList,
-  //   orderBy(request.params.o || 'createdAt', 'desc'),
-  //   startAt(lastVisible),
-  //   limit(PAGINATION_CONFIG.LIMIT)
-  // );
-  const dealsList = await getDocs(collectionQuery);
+    orderBy(orderField, orderSort),
+    limit(queryParams?.limit || LISTING_CONFIG.MAX_LIMIT)
+  )
+  const dealsList = await getDocs(collectionQuery)
+  .catch((err) => {
+    console.log(err)
+    throw new Error("Error al obtener las ofertas.");
+  });
 
   // Early return if no deals found
   if (!dealsList.size) {
-    return response.json([]);
+    return [];
   }
 
   // Format deals
   let deals = [];
   for (const deal of dealsList.docs) {
-    // Get deal's restaurant
-    const restaurant = await getDoc(
-      doc(db, `Restaurants/${deal.get("restaurantId")}`)
-    ).catch((err) => {
-      console.error(err);
-      return response.status(500).json({
-        ...err,
-        message: "No se encontró el restaurante.",
-      });
-    });
-
     // Filter Out Deals that are not valid
     if (!isDealValid(deal.data())) {
       continue;
@@ -443,18 +633,120 @@ exports.getDeals = async (request, response) => {
       continue;
     }
 
+    // If validOn filter is set, 
+    // Search for weekday on recurrenceSchedules
+    if(queryParams.validOn){
+      const weekDays = queryParams.validOn;
+
+      if(isDealRecurrent(deal.data())){
+        const isValidOnWeekday = deal.data().recurrenceSchedules.find(schedule => { 
+          return weekDays.find(day => schedule.daySlug == day.toLocaleLowerCase())
+        });
+      
+        if (!isValidOnWeekday) {
+          continue;
+        }
+      }
+    }
+
+    //
+    const formattedDeal = await getFormattedDeal(deal)
+    .catch((err) => {
+      console.log(err)
+      throw new Error("Error al obtener las ofertas.");
+    });
+
     // Return deals
-    deals.push({
-      ...deal.data(),
-      restaurant: restaurant.get("name"),
-      id: deal.id,
-      startsAt: deal.data().startsAt.toDate(),
-      expiresAt: deal.data().expiresAt.toDate(),
-      createdAt: deal.data().createdAt.toDate(),
+    deals.push(formattedDeal);
+  }
+
+  // Return deals
+  return deals;
+}
+exports.getDealsList = getDealsList;
+const syncRestaurantActiveDealsList = async (restaurantId, deal = {}) => {
+  const { adminDb } = require("../utils/admin");
+  const restaurantRef = adminDb.doc(`Restaurants/${restaurantId}`)
+
+  // Update restaurant deals
+  //const restaurantRef = doc(db, `Restaurants/${restaurantId}`);
+  // const restaurant = await restaurantRef
+  //   .get()
+  //   .catch((err) => {
+  //     console.log(err)
+  //     throw new Error("Error al obtener el restaurante.");
+  //   });
+
+  // Get active deals list
+  let dealsList = await getDealsList(restaurantId, {active: true})
+    .catch(() => {
+      throw new Error("Error al obtener la lista de ofertas.");
+    });
+  
+
+  // Format deals dates
+  dealsList = dealsList.map(deal => {
+    let {recurrenceSchedules } = deal;
+    const expiresAt = dayjs(deal.expiresAt).toDate();
+    const createdAt = dayjs(deal.createdAt).toDate();
+    const startsAt = dayjs(deal.startsAt).toDate();
+
+    recurrenceSchedules = recurrenceSchedules.map(schedule => {
+        return {
+          ...schedule,
+          startsAt,
+          expiresAt,
+        }
+      })
+
+    return {
+      ...deal,
+      recurrenceSchedules,
+      expiresAt,
+      createdAt,
+      startsAt
+    }
+  });
+
+  // Update restaurant deals
+  await adminDb.doc(`Restaurants/${restaurantId}`).update({
+    deals: dealsList
+  }).catch((err) => {
+    console.log(err)
+    throw new Error("Error al actualizar las ofertas del restaurante.");
+  });
+
+  // Return deals
+  console.log('Finished synchronizing active deals to restaurant.')
+  return dealsList;
+}
+exports.syncRestaurantActiveDealsList = syncRestaurantActiveDealsList;
+
+exports.getDeals = async (request, response) => {
+  let dealsList = await getDealsList(request.params.restaurantId, request.query)
+    .catch((err) => {
+      console.error(err);
+      return response.status(500).json({
+        ...err,
+      });
+    });
+
+  // Early return if no deals found
+  if (!dealsList.length) {
+    return response.json([]);
+  }
+
+  // Get reservation count
+  const dealsWithRedepmtionCount = [];
+  for(const deal of dealsList){
+    dealsWithRedepmtionCount.push({
+      ...deal,
+      redemptionsCount: await getDealRedemptions(deal).length
     });
   }
 
-  return response.json(deals);
+  // Return deals
+  return response.json(dealsWithRedepmtionCount);
 };
 exports.getDeal = async (request, response) => {
   const docSnap = await getDoc(doc(db, `Deals/${request.params.dealId}`)).catch(
@@ -466,68 +758,63 @@ exports.getDeal = async (request, response) => {
     }
   );
 
-  if (docSnap.exists()) {
-    // Filter Out Deals that are not valid
-    if (!isDealValid(docSnap.data())) {
-      return response.status(204).json({
-        message: "No se encontró la oferta.",
-      });
-    }
-
-    return response.json({
-      id: docSnap.id,
-      ...docSnap.data(),
-      startsAt: docSnap.data().startsAt.toDate(),
-      expiresAt: docSnap.data().expiresAt.toDate(),
-      createdAt: docSnap.data().createdAt.toDate(),
-    });
-  } else {
+  // Early return if no deal found
+  if (!docSnap.exists()) {
     return response.status(204).json({
       message: "No se encontró la oferta.",
     });
   }
+    
+  // Filter Out Deals that are not valid
+  if (!isDealValid(docSnap.data())) {
+    return response.status(204).json({
+      message: "No se encontró la oferta.",
+    });
+  }
+  const formattedDeal = await getFormattedDeal(docSnap);
+  return response.json(formattedDeal);
 };
 exports.updateDeal = async (request, response) => {
+  // Get deal
   const docRef = doc(db, `Deals/${request.params.dealId}`);
-  const deal = await getDoc(docRef).catch((err) => {
+  let deal = await getDoc(docRef).catch((err) => {
     console.log(err);
     return response.status(500).json({
       ...err,
       message: "Error al obtener la oferta.",
     });
   });
+
+  // Early return if no deal found
   if (!deal.exists()) {
     return response.status(400).json({
       message: "No se encontró la oferta.",
     });
   }
 
-  //
+  // Form new deal object
   const updateObject = {
+    id: deal.id,
+    ...deal.data(),
     ...request.body,
     createdAt: deal.get("createdAt"),
-    startsAt: Timestamp.fromDate(new Date(request.body.startsAt)),
-    expiresAt: Timestamp.fromDate(new Date(request.body.expiresAt)),
+    startsAt: request.body.startsAt ? Timestamp.fromDate(new Date(request.body.startsAt)) : deal.get("startsAt"),
+    expiresAt: request.body.expiresAt ? Timestamp.fromDate(new Date(request.body.expiresAt)) : deal.get("expiresAt"),
   };
 
   // Update record
-  updateDoc(docRef, updateObject)
-    .then(() => {
-      getDoc(docRef).then((documentSnapshot) => {
-        response.json({
-          ...documentSnapshot.data(),
-          startsAt: documentSnapshot.data().startsAt.toDate(),
-          expiresAt: documentSnapshot.data().expiresAt.toDate(),
-          createdAt: documentSnapshot.data().createdAt.toDate(),
-        });
-      });
-    })
+  await updateDoc(docRef, updateObject)
     .catch((err) => {
       console.error(err);
       return response.status(500).json({
         message: "Error al actualizar la oferta.",
       });
     });
+  
+  // Return updated deal
+  deal = await getDoc(docRef);
+  const formattedDeal = await getFormattedDeal(deal);
+  response.json(formattedDeal);
 };
 exports.deleteDeal = async (request, response) => {
   const docRef = doc(db, `Deals/${request.params.dealId}`);
@@ -560,8 +847,137 @@ exports.deleteDeal = async (request, response) => {
     message: "Oferta cancelada.",
   });
 };
+exports.getUniqueDealsByRedemptions = async (request, response) => {
+  let dealsList = await getDealsList(request.params.restaurantId, request.query)
+    .catch((err) => {
+      console.error(err);
+      return response.status(500).json({
+        ...err,
+      });
+    });
+
+  // Early return if no deals found
+  if (!dealsList.length) {
+    return response.json([]);
+  }
+
+  // Get reservation count
+  const dealsWithRedepmtionCount = [];
+  for(const deal of dealsList){
+    console.log('deal')
+    dealsWithRedepmtionCount.push({
+      ...deal,
+      redemptionsCount: await getDealRedemptions(deal).length
+    });
+  }
+
+  // Return deals
+  return response.json(dealsWithRedepmtionCount);
+}
 
 // RESERVATIONS CRUD
+const getFormattedReservation = async (document) => {
+  const reservation = document.data();
+
+  // Get reservation's restaurant
+  let restaurantName = "Restaurante no encontrado.";
+  const restaurant = await getDoc(
+    doc(db, `Restaurants/${reservation.restaurantId}`)
+  ).catch(() => {
+    throw new Error("No se encontró el restaurante.");
+  });
+  if(restaurant.exists()){
+    restaurantName = restaurant.get("name");
+  }
+
+  // Get related deal
+  const dealReference = doc(db, "Deals", reservation.dealId);
+  const deal = await getDoc(dealReference).catch((err) => {
+    throw new CustomError({
+      ...err,
+      status: 400, 
+      message: "Error al obtener la oferta.",
+    });
+  });
+
+  // Confirm that the reservation is linked to a deal
+  let dealDetails = 'Oferta no encontrada.';
+  let dealType = 'N/A';
+  let dealTerms = '';
+  if (deal.exists()) {
+    // Determine status description
+    switch (deal.data().dealType) {
+      case DEAL_TYPE.PROMOTION:
+        dealDetails = deal.data().details
+          ? `${deal.data()?.details}.`
+          : "";
+        break;
+      case DEAL_TYPE.DISCOUNT:
+      default:
+        dealDetails = `${deal.data().discount * 100}% de descuento.`;
+    }
+
+    //
+    dealType = deal.data().dealType;
+    dealTerms = deal.data().terms ? deal.data().terms : "";
+  }
+
+  // Get Customer from Firestore
+  let customer = await getDoc(
+    doc(db, "Users", reservation.customerId)
+  ).catch((err) => {
+    throw new CustomError({
+      ...err,
+      status: 400, 
+      message: "Error al obtener el usuario.",
+    });
+  });
+  let customerEmail = "Email no encontrado";
+  let customerName = "Usuario no encontrado";
+  if (customer.exists()) {
+    customerName = customer.data().email || customerEmail;
+    customerEmail = ( customer.data().firstName || "" ) + " " + ( customer.data().lastName || "" );
+  } else {
+    // If user was not found, try to get it from Firebase Auth
+    customer = await adminAuth.getUser(reservation.customerId)
+      .catch((err) => {
+        console.log(err.errorInfo)
+      });
+    if (customer) {
+      customerName = customer.email || customerEmail;
+      customerEmail = customer.displayName || customerName;
+    }
+  }
+
+  // Determine status description
+  let statusDescription = getReservationStatusDetails(reservation.status);
+
+  // Return formatted reservation.
+  return {
+    id: document.id,
+    ...reservation,
+    restaurant: restaurantName,
+    statusDescription,
+    checkIn: reservation.checkIn
+      ? reservation.checkIn.toDate()
+      : null,
+    cancelledAt: reservation.cancelledAt
+      ? reservation.cancelledAt.toDate()
+      : null,
+    createdAt: reservation.createdAt.toDate(),
+    reservationDate: reservation.reservationDate.toDate(),
+    reminderNotificationSentAt: reservation.reminderNotificationSentAt 
+      ? reservation.reminderNotificationSentAt.toDate() 
+      : null,
+      reminderNotificationSent: reservation.reminderNotificationSent,
+    dealType,
+    dealDetails,
+    dealTerms,
+    customer: customerName,
+    customerEmail: customerEmail,
+  };
+}
+exports.getFormattedReservation = getFormattedReservation;
 const getReservations = async (restaurantId, queryProps) => {
   const filtersList = [where("restaurantId", "==", restaurantId)];
   const queryParams = {
@@ -690,17 +1106,20 @@ const getReservations = async (restaurantId, queryProps) => {
         throw new CustomError({
           ...err,
           status: 400, 
-          message: "Error al obtener la oferta.",
+          message: "Error al obtener el usuario.",
         });
       });
       let customerEmail = "Usuario no encontrado";
       if (customer.exists()) {
-        customerEmail = customer.data().email;
+        customerEmail = ( customer.data().firstName || "" ) + " " + ( customer.data().lastName || "" );
       } else {
         // If user was not found, try to get it from Firebase Auth
-        customer = await adminAuth.getUser(reservation.customerId);
+        customer = await adminAuth.getUser(reservation.customerId)
+          .catch((err) => {
+            console.log(err)
+          });
         if (customer) {
-          customerEmail = customer.email;
+          customerEmail = customer.displayName || "Usuario sin nombre";
         }
       }
 
@@ -832,9 +1251,7 @@ exports.getRestaurantMenus = async (request, response) => {
     });
     return response.json(menus);
   } else {
-    return response.status(204).json({
-      message: "No se encontraron menús.",
-    });
+    return response.status(200).json([]);
   }
 };
 // Post Menus
@@ -964,9 +1381,7 @@ exports.getRestaurantGallery = async (request, response) => {
     });
     return response.json(photos);
   } else {
-    return response.status(204).json({
-      message: "No se encontraron fotografías.",
-    });
+    return response.status(200).json([]);
   }
 };
 // Delete photo
@@ -985,6 +1400,7 @@ const deleteImage = (imageName) => {
 };
 // Upload profile picture
 exports.uploadRestaurantProfilePhoto = async (request, response) => {
+  console.log('image method')
   // Get restaurant document
   const restaurantDocRef = doc(db, `/Restaurants/${request.params.restaurantId}`);
   const getRestaurant = async (restaurantId) => {
@@ -1009,7 +1425,7 @@ exports.uploadRestaurantProfilePhoto = async (request, response) => {
 
   // Define array of file write streams
   const fileWrites = [];
-
+  console.log('before busboy')
   //
   bb.on("file", (name, file, info) => {
     // upload image
@@ -1019,6 +1435,7 @@ exports.uploadRestaurantProfilePhoto = async (request, response) => {
       `Restaurants/${restaurantDocument.slug}/Photos`
     )
       .then(async (fileURLs) => {
+        console.log("fileURLs", fileURLs);
         for (const image of fileURLs) {
           switch (image.keyName) {
             case "avatar":
@@ -1040,6 +1457,7 @@ exports.uploadRestaurantProfilePhoto = async (request, response) => {
         }
       })
       .catch((err) => {
+        console.error("err ", err);
         throw new Error(err);
       });
 
@@ -1048,10 +1466,12 @@ exports.uploadRestaurantProfilePhoto = async (request, response) => {
   });
 
   bb.on("error", (err) => {
+    console.log("Busboy error >>>>:", err);
     functions.logger.error("Busboy error >>>>:", err);
   });
 
   bb.on("finish", async () => {
+    console.log("Busboy finish >>>>:");
     await Promise.all(fileWrites).catch((err) => {
       console.error("err ", err);
     });
@@ -1081,8 +1501,7 @@ exports.getPartnerCurrentBalance = async (request, response) => {
     range_end = dayjs(billingPeriodEnd).toDate();
   }
 
-  // Calulate balance
-  let balanceCalc = 0;
+  // Get Deal Redemptions
   const dealRedemptions = await getDocs(query(
     collection(db, `DealRedemptions`),
     where("restaurantId", "==", restaurantId),
@@ -1095,6 +1514,8 @@ exports.getPartnerCurrentBalance = async (request, response) => {
       });
   });
 
+  // Calulate balance
+  let balanceCalc = 0;
   for(const redemption of dealRedemptions.docs) {
     const averageTicket = redemption.data().averageTicket ? parseFloat(redemption.data().averageTicket) : 0;
     const takeRate = redemption.data().takeRate ? parseFloat(redemption.data().takeRate) : DEFAULT_TAKE_RATE;
@@ -1114,13 +1535,78 @@ exports.getPartnerCurrentBalance = async (request, response) => {
     })
   });
 }
+exports.getPartnerBalanceHistory = async (request, response) => {
+  const restaurantId = request.params.restaurantId;
+  const billingPeriodStart = request.query.periodStart;
+  const billingPeriodEnd = request.query.periodEnd;
+
+  // Filter by date range
+  let range_init = dayjs().startOf('month').toDate();
+  if (billingPeriodStart && dayjs(billingPeriodStart).isValid()) {
+    range_init = dayjs(billingPeriodStart).toDate();
+  }
+  let range_end = dayjs().endOf('month').toDate();
+  if (billingPeriodEnd && dayjs(billingPeriodEnd).isValid()) {
+    range_end = dayjs(billingPeriodEnd).toDate();
+  }
+
+  // Get Deal Redemptions
+  const billings = await getDocs(query(
+    collection(db, `Billings`),
+    where("restaurantId", "==", restaurantId),
+    where("periodStart", ">=", range_init),
+    where("isPaid", "==", false),
+  )).catch((err) => {
+    console.log(err)
+    return response.status(500).json({
+      ...err,
+      message: "Error al obtener el periodo de la facturación.",
+      });
+  });
+
+  // Calulate balance
+  let balanceCalc = 0;
+  let pendingBillings = [];
+  let pendingRedemptions = [];
+  for(const billing of billings.docs) {
+    const billingData = billing.data();
+
+    // Limit billings to range
+    const billingPeriodEnd = dayjs(billingData.periodEnd.toDate());
+    if(billingPeriodEnd.isAfter(dayjs(range_end))){
+      continue; 
+    }
+
+    // Calculate balance
+    balanceCalc += billingData?.debtQuantity || 0;
+    pendingBillings = [
+      ...pendingBillings, 
+      {
+        ...billingData,
+        periodStart: billingData.periodStart?.toDate(),
+        periodEnd: billingData.periodEnd?.toDate(),
+        createdAt: billingData.createdAt?.toDate(),
+        updatedAt: billingData.updatedAt?.toDate(),
+        paidAt: billingData.paidAt?.toDate(),
+      }
+    ];
+    pendingRedemptions = [...pendingRedemptions, ...billingData.redemptions];
+  }
+
+  // Response
+  return response.json({
+    balance: balanceCalc,
+    pendingBillings,
+    pendingRedemptions
+  });
+}
 exports.getPartnerBillings = async (request, response) => {
   const restaurantId = request.params.restaurantId;
   const billingPeriodStart = request.query.periodStart;
   const billingPeriodEnd = request.query.periodEnd;
   
   // Filter by date range
-  let range_init = dayjs().set('month', 0).set('date', 1).toDate();
+  let range_init = dayjs().set('month', 0).set('date', 1).set('year', 2022).toDate();
   if (billingPeriodStart && dayjs(billingPeriodStart).isValid()) {
     range_init = dayjs(dayjs(billingPeriodStart).toISOString())
       .toDate();
@@ -1133,6 +1619,8 @@ exports.getPartnerBillings = async (request, response) => {
       .second(59)
       .toDate();
   }
+
+  console.log(range_init, range_end)
 
   // Get restaurant
   const restaurantDoc = doc(db, "Restaurants", restaurantId);
@@ -1165,6 +1653,7 @@ exports.getPartnerBillings = async (request, response) => {
       id: billing.id,
       ...billing.data(),
       createdAt: billing.data().createdAt.toDate(),
+      updatedAt: billing.data().updatedAt.toDate(),
       periodStart: billing.data().periodStart.toDate(),
       periodEnd: billing.data().periodEnd.toDate(),
       paidAt: billing.data().paidAt ? billing.data().paidAt.toDate() : null,
