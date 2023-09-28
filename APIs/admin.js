@@ -3,7 +3,7 @@ const {
   createUserWithEmailAndPassword,
   sendEmailVerification,
 } = require("firebase/auth");
-const { auth, db, adminAuth } = require("../utils/admin");
+const { auth, db, adminDb, adminAuth, admin } = require("../utils/admin");
 const {
   doc,
   addDoc,
@@ -16,15 +16,21 @@ const {
   orderBy,
   where,
   query,
-  limit
+  limit,
+  startAfter,
+  startAt
 } = require("firebase/firestore");
 const functions = require("firebase-functions");
 const dayjs = require("dayjs");
+const utc = require('dayjs/plugin/utc');
+const timezone = require('dayjs/plugin/timezone');
 const { getNewBillingObject } = require("../utils/billing-utils");
 const { USER_ROLES, DEFAULT_TAKE_RATE, LISTING_CONFIG, SEARCH_CONFIG } = require("../utils/app-config");
 const { DEAL_TYPE } = require("../utils/deals-utils");
 const getCurrentUser = require("../utils/getCurrentUser");
 const algoliasearch = require("algoliasearch");
+const { getFormattedDeal, getFormattedReservation } = require("./partners");
+const { RESERVATION_STATUS } = require("../utils/reservations-utils");
 
 // Config Algolia SDK
 const algoliaClient = algoliasearch(
@@ -81,19 +87,6 @@ exports.editUser = async (request, response) => {
   }
   //
   return response.status(404).json({ message: "Usuario no encontrado." });
-
-  // updateDoc(
-  // 	doc(db, `/Users/`, request.params.userId),
-  // 	request.body
-  // ).then((doc) => {
-  // 		response.json({message: 'Updated successfully'});
-  // 	})
-  // 	.catch((err) => {
-  // 		console.error(error);
-  // 		return response.status(500).json({
-  // 			message: "Cannot Update the value"
-  // 		});
-  // 	});
 };
 exports.deleteUser = async (request, response) => {
   // Get user authId
@@ -122,6 +115,49 @@ exports.deleteUser = async (request, response) => {
   }
 
   return response.status(200).json({ message: "Success", error: authError });
+};
+exports.getAdminUsersSummary = async (request, response) => {
+  // Get all users
+  const allUsersDocs = await getDocs(
+    query(
+      collection(db, "Users")
+    )
+  );
+  const allUsers = allUsersDocs.docs || [];
+
+  // Set defautl counter values
+  let totalUsersCount = allUsers.length;
+  let verifiedUsersCount = 0;
+  let createdThisMonth = 0;
+  let createdToday = 0;
+  let withReservations = 0;
+
+  for(let user of allUsers){
+    // Is verified?
+    if(user.data().emailVerified){
+      verifiedUsersCount += 1;
+    }
+    // Is created this month?
+    if(dayjs(user.data().createdAt.toDate()).isValid()
+      && dayjs(user.data().createdAt.toDate()).isSame(dayjs().startOf('month'), 'month')
+    ){
+      createdThisMonth += 1;
+    }
+    // Is created today?
+    if(dayjs(user.data().createdAt.toDate()).isValid()
+      && dayjs(user.data().createdAt.toDate()).isSame(dayjs().startOf('day'), 'day')
+    ){
+      createdToday += 1;
+    }
+  }
+
+  // Return counters
+  return response.json({
+    total: totalUsersCount,
+    verified: verifiedUsersCount,
+    thisMonth: createdThisMonth,
+    today: createdToday,
+  });
 };
 
 // Restaurants CRUD
@@ -232,6 +268,8 @@ const getRestaurantsList = async (config = {}) => {
       ...doc,
       id: doc.objectID,
       rating,
+      createdAt: dayjs(doc.createdAt).toDate(),
+      updatedAt: dayjs(doc.updatedAt).toDate(),
     });
   }
 
@@ -324,37 +362,391 @@ exports.getAdminRestaurants = async (request, response) => {
   //
   return response.json(restaurants);
 };
+exports.getAdminRestaurantsSummary = async (request, response) => {
+  // Get all restaurants
+  const allRestaurantsDocs = await getDocs(
+    query(
+      collection(db, "Restaurants")
+    )
+  );
+
+  // Default counters
+  const allRestaurants = allRestaurantsDocs.docs || [];
+  let createdRestaurantsToday = 0;
+  let createdRestaurantsMonth = 0;
+  let totalRestaurants = allRestaurants.length;
+  let publishedRestaurants = 0;
+  let activeRestaurantsToday = 0;
+  let approvedRestaurants = 0;
+
+  //
+  for(let restaurant of allRestaurants){
+    // Is created today?
+    if(dayjs(restaurant.data()?.createdAt).isValid()
+      && dayjs(restaurant.data()?.createdAt).isSame(dayjs().startOf('day'), 'day')
+    ){
+      createdRestaurantsToday += 1;
+    }
+    // Is created this month?
+    if(dayjs(restaurant.data()?.createdAt).isValid()
+      && dayjs(restaurant.data()?.createdAt).isSame(dayjs().startOf('month'), 'month')
+    ){
+      createdRestaurantsMonth += 1;
+    }
+    // Is active?
+    if(restaurant.data().active){
+      activeRestaurantsToday += 1;
+    }
+    // Is approved
+    if(restaurant.data().isApproved){
+      approvedRestaurants += 1;
+    }
+    // Is published?
+    if(restaurant.data().active && restaurant.data().isApproved){
+      publishedRestaurants += 1;
+    }
+  }
+
+  // Return counters
+  return response.status(200).json({
+    today: createdRestaurantsToday,
+    thisMonth: createdRestaurantsMonth,
+    total: totalRestaurants,
+    published: publishedRestaurants,
+    active: activeRestaurantsToday,
+    approved: approvedRestaurants
+  });
+};
+
+// Deals CRUD
+const getDealsList = async (queryParams = {}) => {
+  let periodStart = dayjs().startOf("day").toDate();
+  let periodEnd = dayjs().endOf("day").toDate();
+  let restaurantActive = true;
+  let restaurantApproved = true;
+  const filtersList = [
+    where("active", "==", true)
+  ];
+
+  // Validations
+  if(queryParams.query) {
+    // Get restaurants (from Algolia)
+    const searchResults = await getRestaurantsList(
+      {
+        query: queryParams.query
+      }
+    ).catch((err) => {
+      console.error(err);
+      throw new Error("Error al obtener los restaurantes.");
+    });
+    const restaurantIds = searchResults.hits.map((restaurant) => restaurant.id);
+
+    // Early return if there are no results
+    if(!restaurantIds.length) {
+      return [];
+    }
+
+    // Add restaurant filter
+    filtersList.push(where("restaurantId", "in", restaurantIds));
+  }
+  if(queryParams.periodStart && dayjs(queryParams.periodStart).isValid()) {
+    periodStart = dayjs(queryParams.periodStart).startOf("day").toDate();
+    filtersList.push(where("startsAt", ">=", periodStart))
+  }
+  if(queryParams.periodEnd && dayjs(queryParams.periodEnd).isValid()) {
+    periodEnd = dayjs(queryParams.periodEnd).endOf("day").toDate();
+    filtersList.push(where("startsAt", "<=", periodEnd))
+  }
+
+  const activeDeals = await getDocs(
+    query(
+      collection(db, `Deals`),
+      ...filtersList,
+      orderBy("startsAt", "asc"),
+    )
+  ).catch((err) => {
+    console.error(err);
+    throw new Error("Error al obtener las ofertas.");
+  });
+
+  const formattedDeals = [];
+  if(activeDeals.size) {
+    for(let deal of activeDeals.docs) {
+      let restaurantNotFound = false;
+      if(!deal.data().restaurantId){
+        continue
+      }
+      const restaurant = await getDoc(
+        doc(db, `Restaurants`, deal.data().restaurantId)
+      ).catch((err) => {
+        console.error(err);
+        restaurantNotFound = true;
+      });
+      if(restaurantNotFound || !restaurant.exists()){
+        continue;
+      }
+
+      console.log('---------------')
+      console.log('name ', restaurant.data().name)
+      console.log('isApproved ', restaurant.data().isApproved)
+      console.log('active ', restaurant.data().active)
+
+      // Post validations
+      if(queryParams.restaurantActive){
+        restaurantActive = queryParams.restaurantActive == 'false' ? false : true;
+        console.log('restaurantActive ', restaurantActive);
+        if(restaurant.data().active != restaurantActive){
+          continue;
+        }
+      }
+      if(queryParams.restaurantApproved){
+        restaurantApproved = queryParams.restaurantApproved == 'false' ? false : true;
+        console.log('restaurantApproved ', restaurantApproved);
+        if(restaurant.data().isApproved != restaurantApproved){
+          continue;
+        }
+      }
+
+      //
+      formattedDeals.push( (await getFormattedDeal(deal)) );
+    }
+  }
+
+  return formattedDeals;
+}
+exports.getAdminDeals = async (request, response) => {
+  const dealsList = await getDealsList({...request.query})
+    .catch((err) => {
+      //console.log(err)
+      return response.status(500).json({ message: err.message });
+    });
+
+  return response.status(200).json(dealsList);
+};
+exports.getAdminDealsSummary = async (request, response) => {
+  const dealsCollection = collection(db, `Deals`);
+  const activeDealsToday = await getDocs(
+    query(
+      dealsCollection,
+      where("active", "==", true),
+      where("startsAt", ">=", dayjs().startOf("day").toDate()),
+      where("startsAt", "<=", dayjs().endOf("day").toDate())
+    )
+  ).catch((err) => {
+    console.error(err);
+    throw new Error("Error al obtener las ofertas.");
+  });
+  const activeDealsMonth = await getDocs(
+    query(
+      dealsCollection,
+      where("active", "==", true),
+      where("startsAt", ">=", dayjs().startOf("month").toDate()),
+      where("startsAt", "<=", dayjs().endOf("month").toDate())
+    )
+  ).catch((err) => {
+    console.error(err);
+    throw new Error("Error al obtener las ofertas.");
+  });
+  const createdDealsMonth = await getDocs(
+    query(
+      dealsCollection,
+      where("startsAt", ">=", dayjs().startOf("month").toDate()),
+      where("startsAt", "<=", dayjs().endOf("month").toDate())
+    )
+  ).catch((err) => {
+    console.error(err);
+    throw new Error("Error al obtener las ofertas.");
+  });
+
+  // Return counters
+  return response.status(200).json({
+    activeDealsToday: activeDealsToday.size,
+    activeDealsMonth: activeDealsMonth.size,
+    createdDealsMonth: createdDealsMonth.size
+  });
+};
+
+// Reservations CRUD
+const getReservationsList = async (queryParams = {}) => {
+  let periodStart = dayjs().startOf("day").toDate();
+  let periodEnd = dayjs().endOf("day").toDate();
+  let active = queryParams.active && queryParams.active == 'false' ? false : true;
+  let lastReservation = null;
+  const filtersList = [
+    where("active", "==", active)
+  ];
+
+  // Validations
+  if(queryParams.query) {
+    // Get restaurants (from Algolia)
+    const searchResults = await getRestaurantsList(
+      {
+        query: queryParams.query
+      }
+    ).catch((err) => {
+      console.error(err);
+      throw new Error("Error al obtener los restaurantes.");
+    });
+    const restaurantIds = searchResults.hits.map((restaurant) => restaurant.id);
+
+    // Early return if there are no results
+    if(!restaurantIds.length) {
+      return [];
+    }
+
+    // Add restaurant filter
+    filtersList.push(where("restaurantId", "in", restaurantIds));
+  }
+  if(queryParams.periodStart && dayjs(queryParams.periodStart).isValid()) {
+    periodStart = dayjs(queryParams.periodStart).startOf("day").toDate();
+    filtersList.push(where("reservationDate", ">=", periodStart))
+  }
+  if(queryParams.periodEnd && dayjs(queryParams.periodEnd).isValid()) {
+    periodEnd = dayjs(queryParams.periodEnd).endOf("day").toDate();
+    filtersList.push(where("reservationDate", "<=", periodEnd))
+  }
+  if(queryParams.status && Number(queryParams.status) >= 0) {
+    console.log('status ', Number(queryParams.status))
+    filtersList.push(where("status", "==", Number(queryParams.status)));
+  }
+  if(queryParams.lastId){
+    const lastReservationId = queryParams.lastId;
+    console.log(lastReservationId)
+    const lastReservationDocument = await getDoc(
+      doc(db, `Reservations`, lastReservationId)
+    ).catch((err) => {
+      console.error(err);
+      throw new Error("Error al obtener las reservaciones.");
+    });
+    if(lastReservationDocument.exists()){
+      lastReservation = lastReservationDocument;
+    }
+  }
+
+  const reservations = await getDocs(
+    query(
+      collection(db, `Reservations`),
+      ...filtersList,
+      limit(Number(queryParams.limit) > 0 ? Number(queryParams.limit) : LISTING_CONFIG.MAX_LIMIT),
+      orderBy("reservationDate", "asc"),
+      startAfter(lastReservation)
+    )
+  ).catch((err) => {
+    console.error(err);
+    throw new Error("Error al obtener las reservaciones.");
+  });
+
+  const formattedResults = [];
+  if(reservations.size) {
+    for(let reservation of reservations.docs) {
+      formattedResults.push( await getFormattedReservation(reservation) )
+    }
+  }
+
+  return formattedResults;
+}
+exports.getAdminReservations = async (request, response) => {
+  const reservationsList = await getReservationsList(
+    {
+      ...request.query,
+    }
+  ).catch((err) => {
+    console.log(err)
+    return response.status(500).json({ message: err.message });
+  });
+
+  //
+  return response.status(200).json(reservationsList);
+};
+exports.getAdminReservationsSummary = async (request, response) => {
+  const reservationsCollection = collection(db, `Reservations`);
+  const activeReservationsToday = await getDocs(
+    query(
+      reservationsCollection,
+      where("active", "==", true),
+      where("reservationDate", ">=", dayjs().startOf("day").toDate()),
+      where("reservationDate", "<=", dayjs().endOf("day").toDate())
+    )
+  ).catch((err) => {
+    console.error(err);
+    throw new Error("Error al obtener las reservaciones.");
+  });
+  const activeReservationsMonth = await getDocs(
+    query(
+      reservationsCollection,
+      where("active", "==", true),
+      where("reservationDate", ">=", dayjs().startOf("month").toDate()),
+      where("reservationDate", "<=", dayjs().endOf("month").toDate())
+    )
+  ).catch((err) => {
+    console.error(err);
+    throw new Error("Error al obtener las reservaciones.");
+  });
+  const completedReservationsMonth = await getDocs(
+    query(
+      reservationsCollection,
+      where("status", "==", RESERVATION_STATUS.COMPLETED),
+      where("active", "==", false),
+      where("reservationDate", ">=", dayjs().startOf("month").toDate()),
+      where("reservationDate", "<=", dayjs().endOf("month").toDate())
+    )
+  ).catch((err) => {
+    console.error(err);
+    throw new Error("Error al obtener las reservaciones.");
+  });
+  const createdReservationsMonth = await getDocs(
+    query(
+      reservationsCollection,
+      where("reservationDate", ">=", dayjs().startOf("month").toDate()),
+      where("reservationDate", "<=", dayjs().endOf("month").toDate())
+    )
+  ).catch((err) => {
+    console.error(err);
+    throw new Error("Error al obtener las reservaciones.");
+  });
+
+  // Return counters
+  return response.status(200).json({
+    activeReservationsToday: activeReservationsToday.size,
+    activeReservationsMonth: activeReservationsMonth.size,
+    completedReservationsMonth: completedReservationsMonth.size,
+    createdReservationsMonth: createdReservationsMonth.size
+  });
+};
 
 // Billing CRUD
 const createRestaurantBilling = async (restaurantId, periodStart, periodEnd, manualAdjustment = 0) => {
   // Get restaurant
-  const restaurant = await getDoc(
-    doc(db, "Restaurants", restaurantId)
-  ).catch((err) => {
-    throw new Error("Restaurante no encontrado.");
-  });
+  const restaurant = await adminDb.doc(`Restaurants/${restaurantId}`).get()
+    .catch((err) => {
+      throw new Error("Restaurante no encontrado.");
+    });
+  // const restaurant = await getDoc(
+  //   doc(db, "Restaurants", restaurantId)
+  // ).catch((err) => {
+  //   throw new Error("Restaurante no encontrado.");
+  // });
 
   // Get Deals whithin period
-  const dealsQuery = query(
-    collection(db, "Deals"),
-    where("restaurantId", "==", restaurantId),
-    where("createdAt", ">=", periodStart),
-    where("createdAt", "<=", periodEnd),
-    orderBy("createdAt", "desc")
-  )
-  const deals = await getDocs(dealsQuery).catch((err) => {
+  const dealsQuery = adminDb.collection('Deals')
+    .where("restaurantId", "==", restaurantId)
+    .where("createdAt", ">=", periodStart)
+    .where("createdAt", "<=", periodEnd)
+    .orderBy("createdAt", "desc");
+  const deals = await dealsQuery.get().catch((err) => {
     throw new Error("Error al obtener las ofertas.");
   });
+  // const deals = await getDocs(dealsQuery).catch((err) => {
+  //   throw new Error("Error al obtener las ofertas.");
+  // });
 
   // Get Redemptions
-  const redemptionsQuery = query(
-    collection(db, "DealRedemptions"),
-    where("restaurantId", "==", restaurantId),
-    where("createdAt", ">=", periodStart),
-    where("createdAt", "<=", periodEnd),
-    orderBy("createdAt", "desc")
-  )
-  const redemptions = await getDocs(redemptionsQuery).catch((err) => {
+  const redemptionsQuery = adminDb.collection("DealRedemptions")
+    .where("restaurantId", "==", restaurantId)
+    .where("createdAt", ">=", periodStart)
+    .where("createdAt", "<=", periodEnd)
+    .orderBy("createdAt", "desc");
+  const redemptions = await redemptionsQuery.get().catch((err) => {
     throw new Error("Error al obtener las redenciones.");
   });
 
@@ -387,14 +779,16 @@ const createRestaurantBilling = async (restaurantId, periodStart, periodEnd, man
   );
 
   // Create billing
-  const billingDoc = await addDoc(collection(db, "Billings"), billing).catch((err) => {
-    console.log(err)
-    throw new Error("Error al crear la facturación.");
-  });
-  const newBilling = await getDoc(billingDoc).catch((err) => {
-    console.log(err)
-    throw new Error("Error al obtener la facturación.");
-  });
+  const billingDoc = await adminDb.collection("Billings").add(billing)
+    .catch((err) => {
+      console.log(err)
+      throw new Error("Error al crear la facturación.");
+    });
+  const newBilling = await adminDb.collection("Billings").doc(billingDoc.id).get()
+    .catch((err) => {
+      console.log(err)
+      throw new Error("Error al obtener la facturación.");
+    });
 
   return newBilling
 }
@@ -1120,10 +1514,11 @@ exports.billingsPast = async (request, response) => {
 
   return response.json({message: 'Done'});
 }
-exports.createLastMonthBillings = async (context) => {
+exports.createLastMonthBillings = async () => {
   const periodStart = dayjs().subtract(1, 'month').startOf('month').toDate();
   const periodEnd = dayjs(periodStart).endOf('month').toDate();
-  const restaurants = await getDocs(collection(db, "Restaurants"));
+  const restaurants = await adminDb.collection('Restaurants').get();
+  // const restaurants = await getDocs(collection(db, "Restaurants"));
 
   // Loop through restaurants
   for(const restaurant of restaurants.docs) {
@@ -1138,3 +1533,122 @@ exports.createLastMonthBillings = async (context) => {
   console.log('restaurant.id', periodStart, periodEnd)
   return null;
 }
+
+//------------ HELPERS ------------//
+// Update all reservations
+exports.updateAllReservations = async (request, response) => {
+  // Consistent timestamp
+  const now = dayjs();
+  const nowWithReminderOffset = now.add(15, 'minutes').toDate();
+  console.log(dayjs(nowWithReminderOffset).format('YYYY-MM-DD HH:mm:ss'))
+
+  // Get expired reservations
+  const reservationsCollectionRef = adminDb.collection('Reservations')
+      .where('reservationDate', '<=', nowWithReminderOffset)
+      .where('active', '==', true)
+      .where('reminderNotificationSent', '==', false);
+  const reservationsCollection = await reservationsCollectionRef.get();
+  
+  //
+  for(let reservation of reservationsCollection.docs) {
+    console.log('reservation', reservation.id, dayjs.utc(reservation.get('reservationDate').toDate()).format('YYYY-MM-DD HH:mm:ss'))
+  }
+  return response.json({ state: "No reservations found." });
+
+
+  const reservationsReference = collection(db, "Reservations");
+  const reservations = await getDocs(query(reservationsReference));
+
+  if (reservations.size) {
+    for (const reservation of reservations.docs) {
+      //const restaurantData = restaurant.data();
+      await updateDoc(reservation.ref, {
+        ...request.body,
+      }).catch((err) => {
+        console.error(err);
+        return response.status(500).json({
+          ...err,
+          message: "Error al actualizar la reservación.",
+        });
+      });
+    }
+    return response.json({ state: "Updated reservations successfully." });
+  }
+
+  ///
+  return response.json({ state: "No reservations found." });
+};
+
+// Update all deals
+exports.updateAllDeals = async (request, response) => {
+  // Get expired deals
+  const dealsCollectionRef = adminDb.collection('Deals');
+  const dealsCollection = await dealsCollectionRef.get();
+  
+  //
+  for(let deal of dealsCollection.docs) {
+    const restaurant = await adminDb
+      .collection('Restaurants')
+      .doc(deal.get('restaurantId'))
+      .get();
+    let restaurantName = 'Restaurante no encontrado';
+
+    if(restaurant.exists) {
+      restaurantName = restaurant.get('name');
+      // console.log('Restaurant does not exists.');
+      // await adminDb.collection('Deals').doc(deal.id).delete();
+      // continue
+    }
+    await adminDb.collection('Deals').doc(deal.id).update({
+      restaurant: null
+    });
+    console.log('deal', restaurantName, deal.id);
+  }
+  return response.json({ state: "No deals found." });
+};
+
+// Update all users
+exports.updateAllUsers = async (request, response) => {
+  // Get users
+  let usersList = await adminAuth.listUsers()
+    .catch((err) => {
+      console.error(err);
+      return response.status(500).json({
+        ...err,
+        message: 'Ocurrió un error al obtener los usuarios.',
+      });
+    });
+
+  //
+  if (usersList.users.length) {
+    let counter = 0
+    //
+    for (const user of usersList.users) {
+      console.log(user)
+
+      const dbUser = (await getDoc(doc(db, "Users", user.uid)));
+      if(!dbUser.exists()) {
+        console.log('user not found')
+        continue
+      }
+
+      await updateDoc(
+        doc(db, "Users", user.uid), {
+        emailVerified: user.emailVerified,
+      }).catch((err) => {
+        console.error(err);
+        return response.status(500).json({
+          ...err,
+          message: "Error al actualizar la reservación.",
+        });
+      });
+    }
+    return response.json({ state: "Updated users successfully." });
+  }
+
+  ///
+  return response.json({ state: "No users found." });
+};
+
+
+
