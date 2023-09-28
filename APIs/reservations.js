@@ -9,10 +9,13 @@ const {
     Timestamp,
     where,
     limit,
-    orderBy
+    orderBy,
+    FieldPath
 } = require('firebase/firestore');
+const { getMessaging } = require('firebase-admin/messaging');
 const functions = require("firebase-functions");
-const { db, adminDb } = require('../utils/admin');
+const { db, adminDb, admin } = require('../utils/admin');
+const { getNextValidSchedules } = require('./partners');
 const { isDealActive, isDealValid, doesDealHasRedemptionUsage } = require('../utils/deals-utils');
 const { RESERVATION_STATUS } = require('../utils/reservations-utils');
 const dayjs = require('dayjs');
@@ -31,6 +34,8 @@ exports.createReservation = async (request, response) => {
             restaurantId: request.body.restaurantId,
             reservationDate: dayjs(request.body.reservationDate).toDate(),
             createdAt: dayjs().toDate(),
+            reminderNotificationSent: false,
+            reminderNotificationSentAt: null,
             cancelledAt: null,
         };
 
@@ -88,7 +93,6 @@ exports.createReservation = async (request, response) => {
                 message: 'La oferta ha sido desactivada.'
             }) 
         }
-
         if(!deal.get('isRecurrent')){
             if(dayjs(newReservation.reservationDate).isAfter(deal.get('expiresAt').toDate())){
                 return response.status(400).json({
@@ -96,32 +100,22 @@ exports.createReservation = async (request, response) => {
                 }) 
             }
         } else {
-            // Get deal's recurrent schedules
-            const recurrenceSchedules = deal.get('recurrenceSchedules') || [];
-
-            // Check if reservation date is within a valid schedule
-            const reservationWeekday = dayjs(newReservation.reservationDate).format('dddd').toLocaleLowerCase();
-            const isValidWeekday = recurrenceSchedules.find(schedule => schedule.daySlug === reservationWeekday);
-            if(!isValidWeekday){
-                return response.status(400).json({
-                    message: 'No se puede realizar una reservación. La oferta no es válidad para este día.'
-                })
-            }
-
             // Check if reservation schedule is within a valid time range
-            const startTimeToday = dayjs()
+            const newSchedules = await getNextValidSchedules(
+                dayjs(deal.get('startsAt').toDate()), 
+                dayjs(deal.get('expiresAt').toDate())
+            );
+            const startTimeToday = dayjs(newSchedules.nextValidStartDate.toDate())
                 .set('hour', dayjs(deal.get('startsAt').toDate()).get('hour'))
                 .set('minute', dayjs(deal.get('startsAt').toDate()).get('minute'));
-            const expireTimeToday = dayjs()
-                .set('hour', dayjs(deal.get('expiresAt').toDate()).get('hour'))
-                .set('minute', dayjs(deal.get('expiresAt').toDate()).get('minute'));
-            console.log(expireTimeToday.format('dddd HH:mm'), dayjs(newReservation.reservationDate).format('dddd HH:mm'))
+            const expireTimeToday = dayjs(newSchedules.nextValidExpiryDate.toDate());
 
-            if(dayjs(newReservation.reservationDate).isBefore(startTimeToday)){
-                return response.status(400).json({
-                    message: 'No se puede realizar una reservación antes del horario de la oferta.'
-                }) 
-            }
+            //
+            // if(dayjs(newReservation.reservationDate).isBefore(startTimeToday)){
+            //     return response.status(400).json({
+            //         message: 'No se puede realizar una reservación antes del horario de la oferta.'
+            //     }) 
+            // }
             if(dayjs(newReservation.reservationDate).isAfter(expireTimeToday)){
                 return response.status(400).json({
                     message: 'No se puede realizar una reservación después del horario de la oferta.'
@@ -141,6 +135,9 @@ exports.createReservation = async (request, response) => {
         // Add new reservation
         const reservationRef = await addDoc(reservationsCollection, newReservation)
         reservation = await getDoc(reservationRef);
+
+        // Send notification to restaurant
+        sendReservationNotificationToRestaurant(newReservation.restaurantId, 'create', reservation.data());
         
         // Send confirmation to user
         return response.status(200).json({ 
@@ -185,6 +182,9 @@ exports.cancelReservation = async (request, response) => {
             active: isDealActive
         })
 
+        // Send notification to restaurant
+        sendReservationNotificationToRestaurant(reservation.get('restaurantId'), 'cancel', reservation.data());
+
         // Send confirmation to user
         return response.status(200).json({ ...reservation.data(), id: reservation.id })
     } catch (err){
@@ -226,4 +226,126 @@ exports.getReservation = async (request, response) => {
         functions.logger.error(err);
         return response.status(500).json({ ...err, message: 'Error al obtener la reservación.' })
     }
+}
+
+// Send push notification
+const buildReservationNotificationMessage = (operation, data) => {
+    const userName = data.firstName + ' ' + data.lastName;
+    const restaurantName = data.restaurantName;
+
+    if(operation === 'create'){
+        return { 
+            title: 'Nueva reservación confirmada', 
+            body: `Tienes una reservación en ${restaurantName} a nombre de ${userName}. No olvides presentar el código de tu restaurante al cliente.` 
+        }
+    }
+
+    return { 
+        title: 'Reservación cancelada', 
+        body: `Se ha cancelado una reservación en ${restaurantName} a nombre de ${userName}.` 
+    }
+}
+const sendReservationNotificationToRestaurant = async (restaurantId, operation, reservation) => {
+    let messagingResponse = {};
+    const message = {
+        data: {
+            // score: '850',
+            // time: '2:45'
+        },
+        notification: { 
+            title: null, 
+            body: null 
+        },
+        android: {
+            notification: {
+                sound: 'default'
+            }
+        },
+        apns: {
+            payload: {
+                aps: {
+                    sound: 'default'
+                }
+            }
+        },
+        tokens: [],
+    };
+
+    console.log('Preparing to send reservation notification to restaurant: ', restaurantId)
+    // Get reservation restaurant
+    const restaurantRef = adminDb.collection('Restaurants').doc(restaurantId);
+    const restaurant = await restaurantRef.get();
+
+    // Get customer tokens
+    const partnerTokensRef = adminDb.collection('UserDevices')
+        .where('userId', '==', restaurant.data().userId);
+    const partnerTokensCollection = await partnerTokensRef.get();
+    let validPartnerTokens = partnerTokensCollection.docs.reduce((previousTokens, device) =>
+        {
+            let tokensList = previousTokens;
+            const tokenData = device.data();
+            // console.log(`userId: ${reservation.data().customerId} :: ${device.data().token.substring(0, 5)}`);
+            if (tokenData.token != '' && tokenData.token != undefined){
+                tokensList = [...tokensList, tokenData.token];
+            }
+            return tokensList
+        }, []
+    );
+
+    // const partners = [];
+    // for(let token of validPartnerTokens){
+    //     // Get customer information
+    //     const partnerDocument = await adminDb
+    //         .collection('Users')
+    //         .doc(token.userId)
+    //         .get(); 
+    //     if(partnerDocument.exists){
+    //         partners.push({
+    //             ...partnerDocument.data(),
+    //             ...token
+    //         });
+    //     }
+    // }
+    const customer = await adminDb
+        .collection('Users')
+        .doc(reservation.customerId)
+        .get(); 
+    if(!customer.exists){
+        console.log('Cliente no encontrado.');
+    }
+
+    // Loop through each customer related to the restaurant
+    //for(let customer of partners){
+        // Configure message
+        message.notification = buildReservationNotificationMessage(
+            operation, 
+            {
+                restaurantName: restaurant.data().name,
+                firstName: customer.get('firstName'),
+                lastName: customer.get('lastName')
+            }
+        ),
+        message.tokens = validPartnerTokens;
+        console.log('send to de devices ', message)
+
+        // Validate that there are devices to send the notification
+        if(!message.tokens.length){
+            console.log('No device tokens found skipping notification.');
+            //continue;
+        }
+
+        // Send message to the corresponding devices
+        messagingResponse = await getMessaging(admin).sendMulticast(message)
+        .then((response) => {
+            // Response is a message ID string.
+            console.log(response.responses)
+            console.log('Notifications successfully sent.', response);
+        })
+        .catch((error) => {
+            console.log('Error sending notifications.', error);
+        });
+    //}
+
+    //
+    return messagingResponse;
 }
