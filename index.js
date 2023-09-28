@@ -50,7 +50,9 @@ const {
   getCurrentUser,
   getUserReservations,
   editUser,
+  deactivateUser,
   isUsernameAvailable,
+  registerDeviceToken
 } = require("./APIs/users");
 const {
   getPartnerRestaurant,
@@ -122,6 +124,12 @@ const {
 } = require("./APIs/auth");
 const { 
   getAdminRestaurants,
+  getAdminRestaurantsSummary,
+  getAdminDeals,
+  getAdminDealsSummary,
+  getAdminReservations,
+  getAdminReservationsSummary,
+  getAdminUsersSummary,
   getBillings,
   updateBilling,
   createBilling,
@@ -148,12 +156,14 @@ app.post("/auth/send-verification-email", sendVerificationEmail);
 app.get("/users", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), getUsers);
 app.post("/user", createUser);
 app.get("/user", isAuthenticated, getCurrentUser);
+app.delete("/user", isAuthenticated, deactivateUser);
 app.get('/user/:userId', getUser);
 app.put("/user/:userId", editUser);
 app.delete("/user/:userId", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), deleteUser);
 app.get("/user/:userId/deals", getUserDeals);
 app.get("/user/:email/available", isUsernameAvailable);
 app.get("/user/:userId/reservations", isAuthenticated, getUserReservations);
+app.post("/user/:userId/registerDeviceToken", isAuthenticated, registerDeviceToken);
 
 // Reservations
 app.get("/reservations/:reservationId", isAuthenticated, getReservation);
@@ -215,6 +225,12 @@ app.post("/search/:indexName/query", searchRestaurants);
 
 // Admin
 app.post("/admin/restaurants", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), getAdminRestaurants);
+app.get("/admin/restaurants/summary", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), getAdminRestaurantsSummary);
+app.get("/admin/deals/", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), getAdminDeals);
+app.get("/admin/deals/summary", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), getAdminDealsSummary);
+app.get("/admin/users/summary", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), getAdminUsersSummary);
+app.get("/admin/reservations/", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), getAdminReservations);
+app.get("/admin/reservations/summary", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), getAdminReservationsSummary);
 app.post("/admin/redemptions", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), formatRedemptions);
 app.post("/admin/billings-past", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), billingsPast);
 app.post("/admin/billing", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.ADMIN, USER_ROLES.SUPER_ADMIN] }), createBilling);
@@ -230,9 +246,12 @@ app.post("/admin/createLastMonth", isAuthenticated, isAuthorizated({ hasRole: [U
 // Utils
 app.post("/import/restaurants", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.SUPER_ADMIN] }), importRestaurants);
 app.put("/update/restaurants", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.SUPER_ADMIN] }), updateAllRestaurants);
-// app.post('/deals/deleteAllDeals', isAuthenticated, deleteAllDeals); // <------ DAnGEROUS UTILITY
-// app.get('/deals-status', isAuthenticated, updateDealStatus) // <-- UTILITY
-// app.get('/reservation-status', isAuthenticated, updateReservationStatus); // <-- UTILITY
+//app.post('/deals/deleteAllDeals', isAuthenticated, deleteAllDeals); // <------ DAnGEROUS UTILITY
+//app.get('/deals-status', isAuthenticated, updateDealStatus) // <-- UTILITY
+//app.put('/update/reservations', isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.SUPER_ADMIN] }), require('./APIs/admin').updateAllReservations); // <-- UTILITY
+//app.put('/update/deals', isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.SUPER_ADMIN] }), require('./APIs/admin').updateAllDeals); // <-- UTILITY
+//app.put('/update/users', isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.SUPER_ADMIN] }), require('./APIs/admin').updateAllUsers); // <-- UTILITY
+app.post("/push-notifications/", isAuthenticated, isAuthorizated({ hasRole: [USER_ROLES.SUPER_ADMIN] }), require('./utils/push-notifications/customer').sendPushNotification);
 
 // Generic Error Handler
 const handleError = async (err, req, res) => {
@@ -252,14 +271,13 @@ exports.updateDealStatus = functions.pubsub
   .timeZone("America/Mexico_City")
   .onRun(updateDealStatus);
 
-
 exports.updateReservationStatus = functions.pubsub
-  .schedule("*/15 * * * *")
+  .schedule("*/5 * * * *")
   .timeZone("America/Mexico_City")
   .onRun(updateReservationStatus);
 
 exports.createBillings = functions.pubsub
-  .schedule("*/05 * * * *")
+  .schedule("0 0 1 * *")
   .timeZone("America/Mexico_City")
   .onRun(createLastMonthBillings);
 
@@ -286,28 +304,6 @@ exports.createBillings = functions.pubsub
     .document("Restaurants/{restaurantId}")
     .onCreate(async (snap) => {
       const restaurant = snap.data();
-      // const newRestaurant = {
-      //   objectID: snap.id,
-      //   ...restaurant,
-      //   createdAt: restaurant.createdAt._seconds,
-      //   _geoloc: {
-      //     lng: -99.174933,
-      //     lat: 19.408135,
-      //   },
-      //   deals: []
-      // };
-
-      // Add or update new objects
-      // algoliaIndex
-      //   .saveObject(newRestaurant)
-      //   .then(() => {
-      //     console.log("Documents imported into Algolia");
-      //     process.exit(0);
-      //   })
-      //   .catch((error) => {
-      //     console.error("Error when importing documents into Algolia", error);
-      //     process.exit(1);
-      //   });
     });
 
   exports.onUpdateRestaurant = functions.firestore
@@ -321,19 +317,30 @@ exports.createBillings = functions.pubsub
       // Format deals
       let dealsStartsDates = [];
       const deals = restaurant.deals ? restaurant.deals.map((deal) => {
-        dealsStartsDates.push(dayjs(deal.startsAt.toDate()).unix());
+        // Validate dates
+        const startsAt = deal.startsAt.toDate
+          ? dayjs(deal.startsAt.toDate()).unix()
+          : dayjs(deal.startsAt).unix();
+        const expiresAt = deal.expiresAt.toDate
+          ? dayjs(deal.expiresAt.toDate()).unix()
+          : dayjs(deal.expiresAt).unix();
+        const createdAt = deal.createdAt.toDate
+          ? dayjs(deal.createdAt.toDate()).unix()
+          : dayjs(deal.createdAt).unix();
+
+        dealsStartsDates.push(startsAt);
         return {
           ...deal,
           recurrenceSchedules: deal.recurrenceSchedules.map(schedule => {
             return {
               ...schedule,
-              startsAt: dayjs(deal.startsAt.toDate()).unix(),
-              expiresAt: dayjs(deal.expiresAt.toDate()).unix(),
+              startsAt: startsAt,
+              expiresAt: expiresAt,
             }
           }),
-          startsAt: dayjs(deal.startsAt.toDate()).unix(),
-          expiresAt: dayjs(deal.expiresAt.toDate()).unix(),
-          createdAt: dayjs(deal.createdAt.toDate()).unix(),
+          startsAt: startsAt,
+          expiresAt: expiresAt,
+          createdAt: createdAt,
         }
       }) : [];
       dealsStartsDates = dealsStartsDates.sort((a, b) => {return a-b});
@@ -409,39 +416,6 @@ exports.createBillings = functions.pubsub
       if(deal.active){
         deals.push(deal);
       }
-
-      /*
-      // create restaurant object
-      const restaurantUpdate = {
-        objectID: deal.restaurantId,
-        id: deal.restaurantId,
-        deals: deals.map((deal) => {
-          return {
-            ...deal,
-            recurrenceSchedules: deal.recurrenceSchedules.map(schedule => {
-              return {
-                ...schedule,
-                startsAt: dayjs(schedule.startsAt).unix(),
-                expiresAt: dayjs(schedule.startsAt).unix(),
-              }
-            }),
-            startsAt: dayjs(deal.startsAt).unix(),
-            expiresAt: dayjs(deal.expiresAt).unix(),
-            createdAt: dayjs(deal.createdAt).unix(),
-          }
-        }),
-        hasDeals: deals.length > 0 ? true : false
-      };
-
-      // Add or update new objects
-      await algoliaIndex
-        .partialUpdateObject(restaurantUpdate)
-        .then(() => {
-        })
-        .catch((error) => {
-          console.error("Error when importing documents into Algolia", error);
-          process.exit(1);
-        }); */
       
       // Finish Process
       console.log("Finished creating deals.");
@@ -461,39 +435,6 @@ exports.createBillings = functions.pubsub
         console.error("Error al actualizar el restaurante.", err);
         // process.exit(1);
       });
-      
-
-      /* ----------- ALGOLIA ----------- 
-      // create deal object
-      const indexUpdate = {
-        objectID: deal.restaurantId,
-        id: deal.restaurantId,
-        deals: deals.map((deal) => {
-          return {
-            ...deal,
-            recurrenceSchedules: deal.recurrenceSchedules.map(schedule => {
-              return {
-                ...schedule,
-                startsAt: dayjs(schedule.startsAt).unix(),
-                expiresAt: dayjs(schedule.startsAt).unix(),
-              }
-            }),
-            startsAt: dayjs(deal.startsAt).unix(),
-            expiresAt: dayjs(deal.expiresAt).unix(),
-            createdAt: dayjs(deal.createdAt).unix(),
-          }
-        }),
-        hasDeals: deals.length > 0 ? true : false
-      };
-
-      // Add or update new objects
-      await algoliaIndex
-        .partialUpdateObject(indexUpdate, {
-          createIfNotExists: true
-        }).catch((error) => {
-          console.error("Error when updateding documents into Algolia", error);
-          process.exit(1);
-        }); */
       
       // Finish process
       console.log("Finished updating deals.");
