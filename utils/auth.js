@@ -83,7 +83,7 @@ const getUserData = async userId => {
 	const userDB = await getUser(userId);
 
 	// Get user's restaurant
-	let userRestaurantsList = await getRestaurants(userId);
+	let userRestaurantsList = await getUserRestaurants(userId);
 	const userRestaurants = userRestaurantsList.length ? userRestaurantsList : [];
 
 	// Get user's strikes
@@ -108,6 +108,8 @@ const getUserData = async userId => {
 		})
 	}
 }
+module.exports.getUserData = getUserData;
+
 const getUser = async userId => {
 	const user = await getDoc(
 		doc(db, 'Users', userId)
@@ -117,7 +119,7 @@ const getUser = async userId => {
 
 	return user ? user.data() : {};
 }
-const getRestaurants = async userId => {
+const getUserRestaurants = async userId => {
 	const userRestaurant = await getDocs(query(
 		collection(db, 'Restaurants'),
 		where("userId", "==", userId)
@@ -126,4 +128,4 @@ const getRestaurants = async userId => {
 	});
 	return userRestaurant.size ? userRestaurant.docs : [];
 }
-module.exports.getUserData = getUserData;
+module.exports.getUserRestaurants = getUserRestaurants;

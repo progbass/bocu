@@ -175,9 +175,7 @@ exports.getFavorites = async (request, response) => {
         }
         return response.json(favorites);
     } else {
-        return response.status(204).json({
-            message: 'No se encontraron favoritos.'
-        });
+        return response.status(200).json([]);
     }
 }
 // Remove favorite
