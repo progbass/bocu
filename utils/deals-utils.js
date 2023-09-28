@@ -12,7 +12,7 @@ const DEAL_TYPE = {
 }
 exports.DEAL_TYPE = DEAL_TYPE;
 const DEAL_FREQUENCY_TYPE = {
-  ONE_USE: 'ONE_USE',
+  SINGLE_DATE: 'SINGLE_DATE',
   RECURRENT: 'RECURRENT',
 }
 exports.DEAL_FREQUENCY_TYPE = DEAL_FREQUENCY_TYPE;
@@ -52,6 +52,11 @@ exports.isDealActive = (deal) => {
   // Deal is considered as active and valid
   return true;
 };
+
+const isDealRecurrent = (deal) => {
+  return deal.isRecurrent;
+}
+exports.isDealRecurrent = isDealRecurrent;
 
 // Checks if deal has remaining uses
 const doesDealHasRedemptionUsage = (deal) => {
