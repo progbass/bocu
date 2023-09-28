@@ -28,6 +28,7 @@ const {
 } = require("../utils/restaurant-utils");
 const { uploadFiletoBucket } = require("../utils/upload-utils");
 const { isDealActive, isDealValid } = require("../utils/deals-utils");
+const { getDealsList, getFormattedDeal } = require("./partners");
 const getCurrentUser = require("../utils/getCurrentUser");
 const algoliasearch = require("algoliasearch");
 const dayjs = require("dayjs");
@@ -310,7 +311,10 @@ exports.getRestaurants = async (request, response) => {
       }
 
       // Get restaurant deals
-      const deals = await getRestaurantDeals(doc.id);
+      const deals = await getDealsList(doc.id).catch((err) => {
+        console.log(err);
+        throw err;
+      });
 
       // Return restaurant object
       restaurants.push({
@@ -325,9 +329,7 @@ exports.getRestaurants = async (request, response) => {
     //
     return response.json(restaurants);
   } else {
-    return response.status(204).json({
-      message: "No se encontraron restaurantes.",
-    });
+    return response.status(200).json([]);
   }
 };
 // EDIT RESTAURANT
@@ -483,22 +485,7 @@ exports.getRestaurantDeal = async (request, response) => {
   }
 
   let documentReference = doc(db, "Deals", request.params.dealId);
-  await getDoc(documentReference)
-    .then((doc) => {
-      if (!isDealValid(doc.data())) {
-        return response.status(404).json({
-          message: "Oferta inválida.",
-        });
-      }
-
-      response.json({
-        ...doc.data(),
-        id: doc.id,
-        startsAt: doc.data().startsAt.toDate(),
-        expiresAt: doc.data().expiresAt.toDate(),
-        createdAt: doc.data().createdAt.toDate(),
-      });
-    })
+  const deal = await getDoc(documentReference)
     .catch((err) => {
       console.error(err);
       return response.status(500).json({
@@ -506,40 +493,17 @@ exports.getRestaurantDeal = async (request, response) => {
         message: 'Ocurrió un error al obtener la oferta.',
       });
     });
-};
-const getRestaurantDeals = async (restaurantId) => {
-  const deals = [];
 
   //
-  return new Promise((resolve, reject) => {
-    // Get restaurant deals
-    getDocs(
-      query(
-        collection(db, `Deals`),
-        where("restaurantId", "==", restaurantId),
-        where("active", "==", true),
-        limit(LISTING_CONFIG.MAX_LIMIT)
-      )
-    )
-      .then((dealsCollection) => {
-        dealsCollection.forEach((doc) => {
-          if (isDealActive(doc.data())) {
-            deals.push({
-              ...doc.data(),
-              startsAt: doc.data().startsAt.toDate(),
-              expiresAt: doc.data().expiresAt.toDate(),
-              createdAt: doc.data().createdAt.toDate(),
-              id: doc.id,
-            });
-          }
-        });
+  if (!isDealValid(deal.data())) {
+    return response.status(404).json({
+      message: "Oferta inválida.",
+    });
+  }
 
-        return resolve(deals);
-      })
-      .catch((err) => {
-        return reject(err);
-      });
-  });
+  // Return deal
+  const formattedDeal = await getFormattedDeal(deal);
+  response.json(formattedDeal);
 };
 exports.getRestaurantDeals = async (request, response) => {
   // Validate that restaurantId exists.
@@ -549,22 +513,22 @@ exports.getRestaurantDeals = async (request, response) => {
     });
   }
 
-  // Get deals collection
-  let dealsCollection = await getRestaurantDeals(
-    request.params.restaurantId
-  ).catch((err) => {
-    console.error(err);
-    return response.status(500).json({
-      ...err,
-      message: 'Error al obtener las ofertas del restaurante.',
+  // Get list
+  const dealsList = await getDealsList(request.params.restaurantId, request.query)
+    .catch((err) => {
+      console.error(err);
+      return response.status(500).json({
+        ...err,
+      });
     });
-  });
 
-  // Response
-  if (dealsCollection.length > 0) {
-    return response.json(dealsCollection);
+  // Early return if no deals found
+  if (!dealsList.length) {
+    return response.json([]);
   }
-  return response.status(200).json([]);
+
+  // Get deals
+  return response.status(200).json(dealsList);
 };
 
 // Get Gallery
@@ -600,7 +564,7 @@ exports.getRestaurantGallery = async (request, response) => {
     });
     return response.json(photos);
   } else {
-    return response.status(204).json([]);
+    return response.status(200).json([]);
   }
 };
 exports.postRestaurantPhoto = async (request, response) => {
@@ -720,17 +684,20 @@ exports.searchRestaurants = async (request, response) => {
       });
     });
 
+  console.log({
+    ...params,
+    filters,
+    page,
+    aroundRadius,
+    hitsPerPage,
+  })
+
   // Early return if there are no results
   if(!queryResponse.hits.length) {
-    return response.status(204).json([]);
+    return response.status(200).json([]);
   }
 
   // Parse results before returning
-  if (!queryResponse.hits.length) {
-    return response.status(204).json([]);
-  }
-
-
   let hits = queryResponse.hits;
   let results = [];
 
@@ -768,9 +735,16 @@ exports.searchRestaurants = async (request, response) => {
     const deals = doc.deals.map((deal) => {
       return {
         ...deal,
-        createdAt: Timestamp.fromMillis(deal.createdAt._seconds * 1000).toDate(),
-        startsAt: Timestamp.fromMillis(deal.startsAt._seconds * 1000).toDate(),
-        expiresAt: Timestamp.fromMillis(deal.expiresAt._seconds * 1000).toDate(),
+        createdAt: dayjs.unix(deal.createdAt).toDate(),
+        startsAt: dayjs.unix(deal.startsAt).toDate(),
+        expiresAt: dayjs.unix(deal.expiresAt).toDate(),
+        recurrenceSchedules: deal.recurrenceSchedules.map((schedule) => {
+          return {
+            ...schedule,
+            startsAt: dayjs.unix(schedule.startsAt).toDate(),
+            expiresAt: dayjs.unix(schedule.expiresAt).toDate(),
+          }
+        })
       };
     });
 

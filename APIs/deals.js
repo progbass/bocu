@@ -23,6 +23,10 @@ const {
   isDealValid, 
   doesDealHasRedemptionUsage
 } = require("../utils/deals-utils");
+const { 
+  getNextValidSchedules,
+  createNewDeal
+} = require("./partners");
 const {
   RESERVATION_STATUS,
   isReservationActive,
@@ -50,7 +54,7 @@ exports.redeemDeal = async (request, response) => {
       });
     }
 
-    // // Validate that deal is active
+    // Validate that deal is active
     if (!deal.get("active")) {
       // TODO: Today the deal can 'active' = true||false.
       // It may be better to link this property to a 'status' catalog so we can have more granular monitor of the deal's state.
@@ -78,7 +82,16 @@ exports.redeemDeal = async (request, response) => {
 
     // Validate that deal hasn't expired yet
     const NOW = Timestamp.now().toDate();
-    const dealExpirationDate = deal.get("expiresAt").toDate();
+    let dealExpirationDate = dayjs(deal.get("expiresAt").toDate());
+    let dealStartDate = dayjs(deal.get("startsAt").toDate());
+    if(deal.get('isRecurrent')){
+      const newSchedules = getNextValidSchedules(dealStartDate, dealExpirationDate)
+      dealStartDate = newSchedules.nextValidStartDate;
+      dealExpirationDate = newSchedules.nextValidExpiryDate
+        .hour(dealExpirationDate.hour())
+        .minute(dealExpirationDate.minute())
+        .second(dealExpirationDate.second());
+    }
     const dealExpirationWithTolerance = dayjs(dealExpirationDate).add(
       RESERVATION_TOLERANCE_MINUTES,
       "minute"
@@ -123,7 +136,7 @@ exports.redeemDeal = async (request, response) => {
       });
     });
 
-    // Verify if deal is active
+    // Verify if reservation is active
     if (!reservation.get("active")) {
       return response.status(400).json({
         message: "Reservación no activa.",
@@ -131,20 +144,22 @@ exports.redeemDeal = async (request, response) => {
     }
 
     // Verify that reservations is not expired
-    const reservationExpiryDate = dayjs(
-      reservation.get("reservationDate").toDate()
-    );
-    const reservationExpirationWithTolerance = dayjs(reservationExpiryDate).add(
-      RESERVATION_TOLERANCE_MINUTES,
-      "minute"
-    );
-    if (dayjs(NOW).isAfter(dayjs(reservationExpirationWithTolerance))) {
-      return response.status(400).json({
-        message: `La reservación expiró el ${dayjs(reservationExpiryDate).format(
-          HUMAN_READABLE_DATE_FORMAT
-        )}.`,
-      });
-    }
+    /*
+    // const reservationExpiryDate = dayjs(
+    //   reservation.get("reservationDate").toDate()
+    // );
+    // const reservationExpirationWithTolerance = dayjs(reservationExpiryDate).add(
+    //   RESERVATION_TOLERANCE_MINUTES,
+    //   "minute"
+    // );
+    // if (dayjs(NOW).isAfter(dayjs(reservationExpirationWithTolerance))) {
+    //   return response.status(400).json({
+    //     message: `La reservación expiró el ${dayjs(reservationExpiryDate).format(
+    //       HUMAN_READABLE_DATE_FORMAT
+    //     )}.`,
+    //   });
+    // }
+    */
 
     // Concluír la reservación (cambio de status)
     await adminDb.doc(`Reservations/${reservation.id}`).update({
@@ -210,6 +225,35 @@ exports.redeemDeal = async (request, response) => {
             message: err,
           });
         });
+
+      // If deal was recurrent, create a new one.
+        if(deal.get('isRecurrent')){
+          const newSchedules = getNextValidSchedules(
+            dayjs(deal.get('startsAt').toDate()), 
+            dayjs(deal.get("expiresAt").toDate())
+          );
+          
+          await createNewDeal(
+            newSchedules.nextValidStartDate.toDate(),
+            newSchedules.nextValidExpiryDate.toDate(), 
+            deal.get('useMax'),
+            deal.get('dealType'),
+            true,
+            deal.get('recurrenceSchedules')?.map(schedule => {
+                return {
+                    ...schedule,
+                    startsAt: newSchedules.nextValidStartDate.toDate(),
+                    expiresAt: newSchedules.nextValidExpiryDate.toDate(),
+                }
+            }),
+            deal.get('userId'),
+            deal.get('restaurantId'),
+            deal.get('discount'),
+            deal.get('include_drinks'),
+            deal.get('terms'),
+            deal.get('details'),
+          ).catch(err => console.log(err));
+        }
     }
 
     // Enviar notificación al restaurante.
@@ -324,7 +368,16 @@ exports.findDeal = async (request, response) => {
     }
 
     // Validate that deal hasn't expired yet
-    const dealExpirationDate = deal.get("expiresAt").toDate();
+    let dealExpirationDate = dayjs(deal.get("expiresAt").toDate());
+    let dealStartDate = dayjs(deal.get("startsAt").toDate());
+    if(deal.get('isRecurrent')){
+      const newSchedules = getNextValidSchedules(dealStartDate, dealExpirationDate)
+      dealStartDate = newSchedules.nextValidStartDate;
+      dealExpirationDate = newSchedules.nextValidExpiryDate
+        .hour(dealExpirationDate.hour())
+        .minute(dealExpirationDate.minute())
+        .second(dealExpirationDate.second());
+    }
     const dealExpirationWithTolerance = dayjs(dealExpirationDate).add(
       RESERVATION_TOLERANCE_MINUTES,
       "minute"
@@ -338,7 +391,20 @@ exports.findDeal = async (request, response) => {
     }
     
     //
-    dealFound = deal;
+    dealFound = {
+      ...deal.data(), 
+      id: deal.id,
+      createdAt: deal.get("createdAt").toDate(),
+      expiresAt: dealExpirationDate.toDate(),
+      startsAt: dealStartDate.toDate(),
+      recurrenceSchedules: deal.get("recurrenceSchedules")?.map((schedule) => {
+        return {
+          ...schedule,
+          startsAt: dealStartDate.toDate(),
+          expiresAt: dealExpirationDate.toDate(),
+        }
+      })
+    };
     break;
   }
 
@@ -349,13 +415,7 @@ exports.findDeal = async (request, response) => {
   }
 
   // Enviar el más reciente deal encontrado
-  return response.status(200).json({ 
-    ...dealFound.data(), 
-    id: dealFound.id,
-    createdAt: dealFound.get("createdAt").toDate(),
-    expiresAt: dealFound.get("expiresAt").toDate(),
-    startsAt: dealFound.get("startsAt").toDate(),
-  });
+  return response.status(200).json(dealFound);
 };
 exports.deleteAllDeals = async (request, response) => {
   try {
