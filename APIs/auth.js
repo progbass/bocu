@@ -6,12 +6,13 @@ const {
   sendPasswordResetEmail,
   sendEmailVerification,
 } = require("firebase/auth");
-const { getDocs, collection, query, where } = require("firebase/firestore");
+const { doc, getDoc, getDocs, collection, query, where, updateDoc } = require("firebase/firestore");
+//const { getAnalytics, logEvent   }  =  "firebase/analytics";
 const {
   validateLoginData,
   validateSignUpData,
 } = require("../utils/validators");
-const { auth, adminAuth, db } = require("../utils/admin");
+const { auth, adminAuth, db, app } = require("../utils/admin");
 const { getCurrentUser } = require("../utils/auth");
 const { CustomError } = require("../utils/CustomError");
 
@@ -38,22 +39,25 @@ exports.loginUser = async (request, response) => {
   ).catch((error) => {
     console.error(error);
     return response.status(403).json({
-      err: error,
+      err: 'Usuario o contraseña incorrectos.',
     });
   });
   //console.loh(userAuth)
   await signOut(auth).catch((error) => {
     console.error(error);
     return response.status(403).json({
-      err: error,
+      err: 'Error intentando cerrar la sesión.',
     });
   });
+
+  //const analytics = getAnalytics(app);
+  //logEvent(analytics, 'notification_received');
 
   // Sign in user again, but with custom token
   const data = await signIn(userAuth.user.uid).catch((error) => {
     console.error(error);
     return response.status(403).json({
-      err: error,
+      err: 'Error intentando iniciar sesión.',
     });
   });
   return response.json(data);
@@ -97,9 +101,18 @@ exports.verificateUserEmail = async (request, response) => {
         .status(403)
         .json({ ...error, message: "Error verificando al usuario." });
     });
+  
+  // Update user in database
+  await updateDoc(doc(db, "Users", request.params.userId), {
+    emailVerified: user.emailVerified,
+  }).catch((error) => {
+    console.error(error);
+    return response
+      .status(403)
+      .json({ ...error, message: "Error verificando al usuario." });
+  });
 
   //
-  console.log(user)
   return response.json({ message: "success" });
 };
 
